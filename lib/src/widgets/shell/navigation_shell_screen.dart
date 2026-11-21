@@ -26,6 +26,7 @@ import '../../utils/extensions/custom_extensions.dart';
 import '../../utils/misc/toast/toast.dart';
 import '../desktop/desktop_page_frame.dart';
 import '../desktop/desktop_top_bar.dart';
+import '../main_app_scroll_scope.dart';
 import 'big_screen_navigation_bar.dart';
 import 'incognito_banner.dart';
 import 'small_screen_navigation_bar.dart';
@@ -263,7 +264,7 @@ class NavigationShellScreen extends HookConsumerWidget {
         }
         return false;
       },
-      child: scaffold,
+      child: MainAppScrollScope(child: scaffold),
     );
   }
 }

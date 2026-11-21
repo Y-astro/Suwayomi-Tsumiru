@@ -35,6 +35,7 @@ import 'utils/motion/reduce_motion.dart';
 import 'utils/theme/app_theme_builder.dart';
 import 'widgets/desktop/desktop_page_frame.dart';
 import 'widgets/desktop/desktop_window_scaffold.dart';
+import 'widgets/main_app_scroll_scope.dart';
 import 'widgets/web_page_title.dart';
 
 class TsumiruApp extends HookConsumerWidget {
@@ -280,6 +281,14 @@ class AppScrollBehavior extends MaterialScrollBehavior {
       physics = physics.parent
     ) {
       if (!physics.allowUserScrolling) return child;
+    }
+    if (MainAppScrollScope.contains(context) &&
+        context is StatefulElement &&
+        context.state is ScrollableState) {
+      child = MainAppScrollTarget(
+        state: context.state as ScrollableState,
+        child: child,
+      );
     }
     if (context.windowSizeClass == WindowSizeClass.compact) {
       return super.buildScrollbar(context, child, details);

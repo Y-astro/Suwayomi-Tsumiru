@@ -9,6 +9,7 @@ import 'dart:math';
 
 import 'package:collection/collection.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
@@ -147,7 +148,15 @@ class _TabScrollHost extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final controller = useScrollController();
-    return PrimaryScrollController(controller: controller, child: child);
+    final mediaQuery = MediaQuery.of(context);
+    return MediaQuery(
+      data: mediaQuery.copyWith(
+        gestureSettings: const DeviceGestureSettings(
+          touchSlop: kPrecisePointerHitSlop,
+        ),
+      ),
+      child: PrimaryScrollController(controller: controller, child: child),
+    );
   }
 }
 

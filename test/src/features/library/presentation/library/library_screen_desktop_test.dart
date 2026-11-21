@@ -4,6 +4,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -16,6 +17,7 @@ import 'package:tsumiru/src/features/library/presentation/library/controller/lib
 import 'package:tsumiru/src/features/library/presentation/library/controller/library_manga_list.dart';
 import 'package:tsumiru/src/features/library/presentation/library/library_screen.dart';
 import 'package:tsumiru/src/features/library/presentation/library/widgets/desktop_library_toolbar.dart';
+import 'package:tsumiru/src/features/library/presentation/library/widgets/library_manga_grid_view.dart';
 import 'package:tsumiru/src/features/manga_book/data/updates/updates_repository.dart';
 import 'package:tsumiru/src/features/manga_book/domain/manga/graphql/__generated__/fragment.graphql.dart';
 import 'package:tsumiru/src/features/settings/presentation/syncyomi/data/syncyomi_settings_provider.dart';
@@ -26,6 +28,7 @@ import 'package:tsumiru/src/graphql/__generated__/schema.graphql.dart';
 import 'package:tsumiru/src/l10n/generated/app_localizations.dart';
 import 'package:tsumiru/src/tsumiru_app.dart';
 import 'package:tsumiru/src/widgets/desktop/desktop_top_bar.dart';
+import 'package:tsumiru/src/widgets/main_app_scroll_scope.dart';
 
 Fragment$CategoryDto _category(int id, String name) => Fragment$CategoryDto(
   defaultCategory: false,
@@ -103,7 +106,7 @@ Future<ProviderContainer> _pumpLibrary(
         categoryId: 1,
       ).overrideWithValue(
         AsyncData([
-          for (var i = 1; i <= 30; i++)
+          for (var i = 1; i <= 120; i++)
             if (withManga) _manga(i, 'Alpha $i'),
         ]),
       ),
@@ -111,7 +114,7 @@ Future<ProviderContainer> _pumpLibrary(
         categoryId: 2,
       ).overrideWithValue(
         AsyncData([
-          for (var i = 1; i <= 30; i++)
+          for (var i = 1; i <= 120; i++)
             if (withManga) _manga(100 + i, 'Beta $i'),
         ]),
       ),
@@ -141,7 +144,7 @@ Future<ProviderContainer> _pumpLibrary(
         scrollBehavior: const AppScrollBehavior(),
         // Native desktop draws the toolbar in the shell bar above the
         // page; narrower surfaces keep the page on its own.
-        home: Builder(
+        home: MainAppScrollScope(child: Builder(
           builder: (context) => showsMergedTopBar(context)
               ? const Scaffold(
                   body: Column(
@@ -152,7 +155,7 @@ Future<ProviderContainer> _pumpLibrary(
                   ),
                 )
               : const LibraryScreen(categoryId: 1),
-        ),
+        )),
       ),
     ),
   );
@@ -198,6 +201,58 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(find.text('No visible categories'), findsOneWidget);
       expect(find.text('Search title or author...'), findsOneWidget);
+    });
+
+    testWidgets('desktop library tab responds to precise trackpad pan and preserves horizontal paging', (
+      tester,
+    ) async {
+      await _pumpLibrary(tester, surface: const Size(1400, 980), withManga: true);
+
+      final grid = find.byType(LibraryMangaGridView).first;
+      final point = tester.getCenter(grid);
+      final scrollPosition = tester.state<ScrollableState>(
+        find.descendant(of: grid, matching: find.byType(Scrollable)).first,
+      ).position;
+      final tabs = DefaultTabController.of(tester.element(grid));
+
+      final pointer = TestPointer(9, PointerDeviceKind.trackpad);
+      await tester.sendEventToBinding(pointer.panZoomStart(point));
+
+      double? onset;
+      for (var step = 1; step <= 50; step++) {
+        await tester.sendEventToBinding(
+          pointer.panZoomUpdate(
+            point,
+            pan: Offset(0, -step * 0.5),
+            timeStamp: Duration(milliseconds: step * 6),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 6));
+        if (onset == null && scrollPosition.pixels > 0) onset = step * 0.5;
+      }
+
+      expect(onset, isNotNull);
+      // Under kPrecisePointerHitSlop (1.0) and TouchTabPager competition, onset is <= 3px.
+      // Without patch, it took > 18px!
+      expect(onset!, lessThanOrEqualTo(3.0), reason: 'Trackpad scrolling should start quickly on desktop library tab');
+
+      await tester.sendEventToBinding(pointer.panZoomEnd(timeStamp: const Duration(milliseconds: 306)));
+      await tester.pumpAndSettle();
+
+      final horizontal = TestPointer(10, PointerDeviceKind.trackpad);
+      await tester.sendEventToBinding(horizontal.panZoomStart(point,
+          timeStamp: const Duration(seconds: 1)));
+      for (var step = 1; step <= 24; step++) {
+        await tester.sendEventToBinding(horizontal.panZoomUpdate(point,
+          pan: Offset(-step * 50.0, 0),
+          timeStamp: Duration(milliseconds: 1000 + step * 12)));
+        await tester.pump(const Duration(milliseconds: 12));
+      }
+      await tester.sendEventToBinding(horizontal.panZoomEnd(
+          timeStamp: const Duration(milliseconds: 1300)));
+      await tester.pumpAndSettle();
+      expect(tabs.index, 1);
+      expect(tester.takeException(), isNull);
     });
   });
 }
