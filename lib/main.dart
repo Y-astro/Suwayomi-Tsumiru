@@ -66,6 +66,8 @@ import 'src/utils/crash/diagnostics.dart';
 import 'src/utils/crash/provider_failure_logger.dart';
 import 'src/utils/crash/redact_tokens.dart';
 import 'src/utils/desktop/desktop_window.dart';
+import 'src/utils/desktop/native_engine_stub.dart'
+    if (dart.library.io) 'src/utils/desktop/native_engine_io.dart';
 import 'src/utils/extensions/custom_extensions.dart';
 import 'src/utils/hive/graphql_cache_guard.dart';
 import 'src/utils/misc/toast/toast.dart';
@@ -97,6 +99,7 @@ void main() {
 }
 
 Future<void> _startApp() async {
+  initializeNativeEngine();
   _TsumiruWidgetsBinding.ensureInitialized();
   if (kIsWeb) {
     await BrowserContextMenu.disableContextMenu();

@@ -57,6 +57,24 @@ endfunction()
 set(FLUTTER_MANAGED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/flutter")
 add_subdirectory(${FLUTTER_MANAGED_DIR})
 
+# An app-local engine can replace GTK presentation without changing the SDK or system GTK.
+if(NOT "$ENV{TSUMIRU_NATIVE_ENGINE_DIR}" STREQUAL "")
+  get_filename_component(TSUMIRU_NATIVE_ENGINE_DIR "$ENV{TSUMIRU_NATIVE_ENGINE_DIR}" REALPATH)
+  include("${TSUMIRU_NATIVE_ENGINE_DIR}/build-mode.cmake")
+  if(NOT CMAKE_BUILD_TYPE STREQUAL TSUMIRU_NATIVE_BUILD_MODE)
+    message(FATAL_ERROR "Custom engine mode ${TSUMIRU_NATIVE_BUILD_MODE} does not match ${CMAKE_BUILD_TYPE}")
+  endif()
+  set(TSUMIRU_NATIVE_LIBRARY "${TSUMIRU_NATIVE_ENGINE_DIR}/libflutter_linux_gtk.so")
+  set(TSUMIRU_NATIVE_CORE "${TSUMIRU_NATIVE_ENGINE_DIR}/libflutter_engine.so")
+  if(NOT EXISTS "${TSUMIRU_NATIVE_LIBRARY}" OR NOT EXISTS "${TSUMIRU_NATIVE_CORE}")
+    message(FATAL_ERROR "Build the app-local engine with tool/linux_native/build.py first")
+  endif()
+  get_target_property(TSUMIRU_FLUTTER_LINKS flutter INTERFACE_LINK_LIBRARIES)
+  list(REMOVE_ITEM TSUMIRU_FLUTTER_LINKS "${FLUTTER_LIBRARY}")
+  set_property(TARGET flutter PROPERTY INTERFACE_LINK_LIBRARIES "${TSUMIRU_NATIVE_LIBRARY};${TSUMIRU_FLUTTER_LINKS}")
+  set(FLUTTER_LIBRARY "${TSUMIRU_NATIVE_LIBRARY}")
+endif()
+
 # System-level dependencies.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
@@ -143,6 +161,12 @@ install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}
 
 install(FILES "${FLUTTER_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
+if(TSUMIRU_NATIVE_CORE)
+  install(FILES "${TSUMIRU_NATIVE_CORE}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+  install(FILES "${TSUMIRU_NATIVE_ENGINE_DIR}/ENGINE_LICENSE"
+    DESTINATION "${INSTALL_BUNDLE_DATA_DIR}/licenses" COMPONENT Runtime)
+endif()
 
 foreach(bundled_library ${PLUGIN_BUNDLED_LIBRARIES})
   install(FILES "${bundled_library}"

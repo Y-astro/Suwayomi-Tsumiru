@@ -1,0 +1,1247 @@
+--- a/flutter/shell/platform/linux/fl_accessible_text_field.cc
++++ b/flutter/shell/platform/linux/fl_accessible_text_field.cc
+@@ -6,7 +6,9 @@
+ #include "flutter/shell/platform/linux/public/flutter_linux/fl_standard_message_codec.h"
+ #include "flutter/shell/platform/linux/public/flutter_linux/fl_value.h"
+ 
++#if !PANGO_VERSION_CHECK(1, 44, 0)
+ G_DEFINE_AUTOPTR_CLEANUP_FUNC(PangoContext, g_object_unref)
++#endif
+ // PangoLayout g_autoptr macro weren't added until 1.49.4. Add them manually.
+ // https://gitlab.gnome.org/GNOME/pango/-/commit/0b84e14
+ #if !PANGO_VERSION_CHECK(1, 49, 4)
+--- a/flutter/shell/platform/linux/fl_compositor_opengl.cc
++++ b/flutter/shell/platform/linux/fl_compositor_opengl.cc
+@@ -4,8 +4,32 @@
+ 
+ #include "fl_compositor_opengl.h"
+ 
++#include <cinttypes>
+ #include <epoxy/egl.h>
+ #include <epoxy/gl.h>
++#include "presentation-time-client-protocol.h"
++
++static uint64_t debug_presented = 0;
++static uint64_t debug_discarded = 0;
++
++static void presentation_output(void*, struct wp_presentation_feedback*, struct wl_output*) {}
++static void presentation_done(void*, struct wp_presentation_feedback* feedback,
++                              uint32_t sec_hi, uint32_t sec_lo, uint32_t nsec,
++                              uint32_t refresh, uint32_t, uint32_t, uint32_t flags) {
++  debug_presented++;
++  uint64_t timestamp = ((static_cast<uint64_t>(sec_hi) << 32) | sec_lo) * 1000000000ULL + nsec;
++  if (debug_presented <= 3 || debug_presented % 60 == 0) {
++    g_message("PRESENTED count=%" PRIu64 " time_ns=%" PRIu64 " refresh_ns=%u flags=%u discarded=%" PRIu64,
++              debug_presented, timestamp, refresh, flags, debug_discarded);
++  }
++  wp_presentation_feedback_destroy(feedback);
++}
++static void presentation_discarded(void*, struct wp_presentation_feedback* feedback) {
++  debug_discarded++;
++  wp_presentation_feedback_destroy(feedback);
++}
++static const struct wp_presentation_feedback_listener kFeedbackListener = {
++    presentation_output, presentation_done, presentation_discarded};
+ 
+ #include "flutter/common/constants.h"
+ #include "flutter/shell/platform/embedder/embedder.h"
+@@ -36,6 +60,11 @@
+ 
+   // Ensure Flutter and GTK can access the frame data (framebuffer or pixels).
+   GMutex frame_mutex;
++
++  // Wayland subsurface direct presentation members:
++  FlWaylandSurface* surface;
++  uint64_t child_swap_count;
++  uint64_t present_layers_count;
+ };
+ 
+ G_DEFINE_TYPE(FlCompositorOpenGL,
+@@ -66,7 +95,9 @@
+                                                     size_t layers_count) {
+   FlCompositorOpenGL* self = FL_COMPOSITOR_OPENGL(compositor);
+ 
++  g_autoptr(FlWaylandSurface) surface = nullptr;
+   g_mutex_lock(&self->frame_mutex);
++  self->present_layers_count++;
+   if (layers_count == 0) {
+     g_mutex_unlock(&self->frame_mutex);
+     return TRUE;
+@@ -93,6 +124,8 @@
+   GLint saved_current_program;
+   glGetIntegerv(GL_CURRENT_PROGRAM, &saved_current_program);
+   GLboolean saved_scissor_test = glIsEnabled(GL_SCISSOR_TEST);
++  GLint saved_viewport[4];
++  glGetIntegerv(GL_VIEWPORT, saved_viewport);
+   GLboolean saved_blend = glIsEnabled(GL_BLEND);
+   GLint saved_src_rgb;
+   glGetIntegerv(GL_BLEND_SRC_RGB, &saved_src_rgb);
+@@ -201,11 +234,98 @@
+   }
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, saved_read_framebuffer_binding);
+ 
++  surface = fl_wayland_surface_ref(self->surface);
+   g_mutex_unlock(&self->frame_mutex);
+ 
++  if (surface != nullptr && self->opengl_manager != nullptr) {
++    // Resize on the raster thread so allocation changes cannot race EGL buffer access.
++    wl_egl_window_resize(surface->window, width, height, 0, 0);
++    EGLDisplay egl_display = fl_opengl_manager_get_egl_display(self->opengl_manager);
++    EGLContext render_context = fl_opengl_manager_get_render_context(self->opengl_manager);
++
++    if (eglMakeCurrent(egl_display, surface->surface, surface->surface, render_context)) {
++      eglSwapInterval(egl_display, 0);
++      glBindFramebuffer(GL_READ_FRAMEBUFFER, fl_framebuffer_get_id(self->framebuffer));
++      if (self->child_swap_count == 0 && g_getenv("TSUMIRU_NATIVE_TRACE")) {
++        uint8_t pixel[4] = {};
++        glReadPixels(width / 2, height / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
++        g_message("Native source pixel RGBA %u %u %u %u, FBO %u, size %zux%zu",
++                  pixel[0], pixel[1], pixel[2], pixel[3],
++                  fl_framebuffer_get_id(self->framebuffer), width, height);
++      }
++      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
++      const GLenum window_buffer = GL_BACK;
++      glDrawBuffers(1, &window_buffer);
++      glViewport(0, 0, width, height);
++      glDisable(GL_SCISSOR_TEST);
++      glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
++      glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
++      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
++      glReadBuffer(GL_BACK);
++      if (self->child_swap_count < 2 && g_getenv("TSUMIRU_NATIVE_TRACE")) {
++        uint8_t pixel[4] = {};
++        EGLint sw = 0, sh = 0;
++        eglQuerySurface(egl_display, surface->surface, EGL_WIDTH, &sw);
++        eglQuerySurface(egl_display, surface->surface, EGL_HEIGHT, &sh);
++        glReadPixels(sw / 2, sh / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
++        g_message("Native output RGBA %u %u %u %u, surface %dx%d", pixel[0], pixel[1], pixel[2], pixel[3], sw, sh);
++      }
++      GLenum blit_error = glGetError();
++      if (surface->presentation != nullptr) {
++        auto* feedback = wp_presentation_feedback(surface->presentation, surface->child);
++        wp_presentation_feedback_add_listener(feedback, &kFeedbackListener, nullptr);
++      }
++      EGLBoolean swapped = eglSwapBuffers(egl_display, surface->surface);
++      if (blit_error != GL_NO_ERROR || !swapped) {
++        g_warning("Subsurface frame failed: GL=0x%x EGL=0x%x", blit_error,
++                  swapped ? EGL_SUCCESS : eglGetError());
++      } else {
++        self->child_swap_count++;
++      }
++
++      if ((self->child_swap_count == 1 || self->child_swap_count % 120 == 0) &&
++          g_getenv("TSUMIRU_NATIVE_TRACE")) {
++        g_message("[HIGH-REFRESH WAYLAND] Subsurface swap #%" PRIu64 " (%zdx%zd)",
++                  self->child_swap_count, width, height);
++      }
++
++      // Restore surfaceless context and original bindings
++      eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, render_context);
++      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, saved_draw_framebuffer_binding);
++      glBindFramebuffer(GL_READ_FRAMEBUFFER, saved_read_framebuffer_binding);
++      glBindTexture(GL_TEXTURE_2D, saved_texture_binding);
++      glBindVertexArray(saved_vao_binding);
++      glBindBuffer(GL_ARRAY_BUFFER, saved_array_buffer_binding);
++      glUseProgram(saved_current_program);
++      glViewport(saved_viewport[0], saved_viewport[1], saved_viewport[2], saved_viewport[3]);
++      if (saved_scissor_test) glEnable(GL_SCISSOR_TEST);
++    }
++  }
++
+   fl_task_runner_stop_wait(self->task_runner);
+ 
+   return TRUE;
++}
++
++void fl_compositor_opengl_set_subsurface(FlCompositorOpenGL* self,
++                                         FlWaylandSurface* surface) {
++  g_return_if_fail(FL_IS_COMPOSITOR_OPENGL(self));
++  g_autoptr(FlWaylandSurface) previous = nullptr;
++  {
++    g_autoptr(GMutexLocker) locker = g_mutex_locker_new(&self->frame_mutex);
++    previous = self->surface;
++    self->surface = fl_wayland_surface_ref(surface);
++  }
++}
++
++uint64_t fl_compositor_opengl_get_child_swap_count(FlCompositorOpenGL* self) {
++  g_return_val_if_fail(FL_IS_COMPOSITOR_OPENGL(self), 0);
++  return self->child_swap_count;
++}
++
++uint64_t fl_compositor_opengl_get_present_layers_count(FlCompositorOpenGL* self) {
++  g_return_val_if_fail(FL_IS_COMPOSITOR_OPENGL(self), 0);
++  return self->present_layers_count;
+ }
+ 
+ static void fl_compositor_opengl_get_frame_size(FlCompositor* compositor,
+@@ -310,18 +430,24 @@
+ static void fl_compositor_opengl_dispose(GObject* object) {
+   FlCompositorOpenGL* self = FL_COMPOSITOR_OPENGL(object);
+ 
++  fl_compositor_opengl_set_subsurface(self, nullptr);
+   g_clear_object(&self->shader);
+ 
+   g_clear_object(&self->task_runner);
+   g_clear_object(&self->opengl_manager);
+   g_clear_object(&self->framebuffer);
+   g_clear_pointer(&self->pixels, g_free);
+-  g_mutex_clear(&self->frame_mutex);
+ 
+   G_OBJECT_CLASS(fl_compositor_opengl_parent_class)->dispose(object);
+ }
+ 
++static void fl_compositor_opengl_finalize(GObject* object) {
++  g_mutex_clear(&FL_COMPOSITOR_OPENGL(object)->frame_mutex);
++  G_OBJECT_CLASS(fl_compositor_opengl_parent_class)->finalize(object);
++}
++
+ static void fl_compositor_opengl_class_init(FlCompositorOpenGLClass* klass) {
++  G_OBJECT_CLASS(klass)->finalize = fl_compositor_opengl_finalize;
+   FL_COMPOSITOR_CLASS(klass)->present_layers =
+       fl_compositor_opengl_present_layers;
+   FL_COMPOSITOR_CLASS(klass)->get_frame_size =
+--- a/flutter/shell/platform/linux/fl_compositor_opengl.h
++++ b/flutter/shell/platform/linux/fl_compositor_opengl.h
+@@ -42,6 +42,17 @@
+                                              FlOpenGLManager* opengl_manager,
+                                              gboolean shareable);
+ 
++#include <wayland-client.h>
++#include <wayland-egl.h>
++#include <epoxy/egl.h>
++#include "flutter/shell/platform/linux/fl_wayland_surface.h"
++
++void fl_compositor_opengl_set_subsurface(FlCompositorOpenGL* self,
++                                         FlWaylandSurface* surface);
++
++uint64_t fl_compositor_opengl_get_child_swap_count(FlCompositorOpenGL* self);
++uint64_t fl_compositor_opengl_get_present_layers_count(FlCompositorOpenGL* self);
++
+ G_END_DECLS
+ 
+ #endif  // FLUTTER_SHELL_PLATFORM_LINUX_FL_COMPOSITOR_OPENGL_H_
+--- a/flutter/shell/platform/linux/fl_engine.cc
++++ b/flutter/shell/platform/linux/fl_engine.cc
+@@ -4,11 +4,14 @@
+ 
+ #include "flutter/shell/platform/linux/public/flutter_linux/fl_engine.h"
+ 
++#include <cinttypes>
++#include <cstring>
+ #include <epoxy/egl.h>
+ #include <gmodule.h>
+-
+-#include <cstring>
+-
++#include <gtk/gtk.h>
++
++#include "dart_api_dl.h"
++#include "flutter/shell/platform/common/isolate_scope.h"
+ #include "flutter/common/constants.h"
+ #include "flutter/shell/platform/common/engine_switches.h"
+ #include "flutter/shell/platform/embedder/embedder.h"
+@@ -107,6 +110,16 @@
+   FlEnginePlatformMessageHandler platform_message_handler;
+   gpointer platform_message_handler_data;
+   GDestroyNotify platform_message_handler_destroy_notify;
++
++  // Vsync and frame clock pacing
++  GMutex vsync_mutex;
++  GArray* vsync_batons;
++  // shortcut: One pacing view per engine; revisit when Tsumiru adds multiple Flutter views.
++  GtkWidget* frame_clock_view;
++  guint tick_callback_id;
++  guint bootstrap_timer_id;
++  uint64_t vsync_dispatched_count;
++  gint64 last_vsync_log_time;
+ };
+ 
+ G_DEFINE_QUARK(fl_engine_error_quark, fl_engine_error)
+@@ -590,7 +603,29 @@
+ static void fl_engine_dispose(GObject* object) {
+   FlEngine* self = FL_ENGINE(object);
+ 
++  if (self->tick_callback_id != 0 && self->frame_clock_view != nullptr) {
++    gtk_widget_remove_tick_callback(self->frame_clock_view, self->tick_callback_id);
++    self->tick_callback_id = 0;
++  }
++  if (self->bootstrap_timer_id != 0) {
++    g_source_remove(self->bootstrap_timer_id);
++    self->bootstrap_timer_id = 0;
++  }
++  self->frame_clock_view = nullptr;
++
+   if (self->engine != nullptr) {
++    {
++      g_autoptr(GMutexLocker) locker = g_mutex_locker_new(&self->vsync_mutex);
++      if (self->embedder_api.GetCurrentTime != nullptr && self->embedder_api.OnVsync != nullptr) {
++        uint64_t now = self->embedder_api.GetCurrentTime();
++        for (guint i = 0; i < self->vsync_batons->len; i++) {
++          intptr_t baton = g_array_index(self->vsync_batons, intptr_t, i);
++          self->embedder_api.OnVsync(self->engine, baton, now, now);
++        }
++      }
++      g_array_set_size(self->vsync_batons, 0);
++    }
++
+     if (self->embedder_api.Shutdown(self->engine) != kSuccess) {
+       g_warning("Failed to shutdown Flutter engine");
+     }
+@@ -637,8 +672,16 @@
+   G_OBJECT_CLASS(fl_engine_parent_class)->dispose(object);
+ }
+ 
++static void fl_engine_finalize(GObject* object) {
++  FlEngine* self = FL_ENGINE(object);
++  g_array_unref(self->vsync_batons);
++  g_mutex_clear(&self->vsync_mutex);
++  G_OBJECT_CLASS(fl_engine_parent_class)->finalize(object);
++}
++
+ static void fl_engine_class_init(FlEngineClass* klass) {
+   G_OBJECT_CLASS(klass)->dispose = fl_engine_dispose;
++  G_OBJECT_CLASS(klass)->finalize = fl_engine_finalize;
+   G_OBJECT_CLASS(klass)->set_property = fl_engine_set_property;
+ 
+   g_object_class_install_property(
+@@ -682,6 +725,14 @@
+       });
+ 
+   self->texture_registrar = fl_texture_registrar_new(self);
++
++  g_mutex_init(&self->vsync_mutex);
++  self->vsync_batons = g_array_new(FALSE, FALSE, sizeof(intptr_t));
++  self->frame_clock_view = nullptr;
++  self->tick_callback_id = 0;
++  self->bootstrap_timer_id = 0;
++  self->vsync_dispatched_count = 0;
++  self->last_vsync_log_time = 0;
+ }
+ 
+ static FlEngine* fl_engine_new_full(FlDartProject* project,
+@@ -754,6 +805,133 @@
+ FlDisplayMonitor* fl_engine_get_display_monitor(FlEngine* self) {
+   g_return_val_if_fail(FL_IS_ENGINE(self), nullptr);
+   return self->display_monitor;
++}
++
++static void fl_engine_dispatch_batons(FlEngine* self, uint64_t interval_nanos) {
++  g_autoptr(GArray) batons = g_array_new(FALSE, FALSE, sizeof(intptr_t));
++  {
++    g_autoptr(GMutexLocker) locker = g_mutex_locker_new(&self->vsync_mutex);
++    g_array_append_vals(batons, self->vsync_batons->data, self->vsync_batons->len);
++    g_array_set_size(self->vsync_batons, 0);
++  }
++  if (batons->len == 0 || self->engine == nullptr) {
++    return;
++  }
++
++  uint64_t start_time = self->embedder_api.GetCurrentTime != nullptr
++                            ? self->embedder_api.GetCurrentTime()
++                            : 0;
++  uint64_t target_time = start_time + interval_nanos;
++
++  for (guint i = 0; i < batons->len; i++) {
++    intptr_t baton = g_array_index(batons, intptr_t, i);
++    self->embedder_api.OnVsync(self->engine, baton, start_time, target_time);
++    self->vsync_dispatched_count++;
++  }
++
++  gint64 now_us = g_get_monotonic_time();
++  if (self->last_vsync_log_time == 0 || now_us - self->last_vsync_log_time >= 1000000) {
++    double fps = interval_nanos > 0 ? 1000000000.0 / interval_nanos : 0.0;
++    if (g_getenv("TSUMIRU_NATIVE_TRACE")) g_message("[HIGH-REFRESH PACING] Total vsyncs: %" PRIu64 ", interval: %.2f ms (%.1f Hz target)",
++              self->vsync_dispatched_count, interval_nanos / 1000000.0, fps);
++    self->last_vsync_log_time = now_us;
++  }
++}
++
++static gboolean fl_engine_on_tick_cb(GtkWidget* widget, GdkFrameClock* clock, gpointer user_data) {
++  FlEngine* self = FL_ENGINE(user_data);
++  if (self->engine == nullptr) {
++    self->tick_callback_id = 0;
++    return G_SOURCE_REMOVE;
++  }
++
++  gint64 refresh_us = 0;
++  gdk_frame_clock_get_refresh_info(clock, gdk_frame_clock_get_frame_time(clock), &refresh_us, nullptr);
++  uint64_t interval_nanos = refresh_us > 0 ? refresh_us * 1000ULL : 16666667;
++  GdkDisplay* display = gtk_widget_get_display(widget);
++  GdkWindow* window = gtk_widget_get_window(widget);
++  if (display != nullptr && window != nullptr) {
++    GdkMonitor* monitor = gdk_display_get_monitor_at_window(display, window);
++    if (monitor == nullptr) {
++      monitor = gdk_display_get_primary_monitor(display);
++    }
++    if (monitor != nullptr) {
++      int rate_mhz = gdk_monitor_get_refresh_rate(monitor);
++      if (rate_mhz > 0) {
++        if (refresh_us <= 0) interval_nanos = 1000000000000ULL / rate_mhz;
++      }
++    }
++  }
++
++  fl_engine_dispatch_batons(self, interval_nanos);
++
++  {
++    g_autoptr(GMutexLocker) locker = g_mutex_locker_new(&self->vsync_mutex);
++    if (self->vsync_batons->len == 0) {
++      self->tick_callback_id = 0;
++      return G_SOURCE_REMOVE;
++    }
++  }
++
++  // Request next compositor frame opportunity on parent GTK surface
++  gtk_widget_queue_draw(widget);
++  return G_SOURCE_CONTINUE;
++}
++
++static gboolean fl_engine_bootstrap_timer_cb(gpointer user_data) {
++  FlEngine* self = FL_ENGINE(user_data);
++
++  if (self->frame_clock_view != nullptr && gtk_widget_get_realized(self->frame_clock_view)) {
++    self->bootstrap_timer_id = 0;
++    if (self->tick_callback_id == 0) {
++      self->tick_callback_id = gtk_widget_add_tick_callback(
++          self->frame_clock_view, fl_engine_on_tick_cb, self, nullptr);
++    }
++    gtk_widget_queue_draw(self->frame_clock_view);
++    return G_SOURCE_REMOVE;
++  }
++
++  fl_engine_dispatch_batons(self, 16666667);
++
++  {
++    g_autoptr(GMutexLocker) locker = g_mutex_locker_new(&self->vsync_mutex);
++    if (self->vsync_batons->len == 0) {
++      self->bootstrap_timer_id = 0;
++      return G_SOURCE_REMOVE;
++    }
++  }
++  return G_SOURCE_CONTINUE;
++}
++
++static gboolean fl_engine_schedule_vsync_on_main(gpointer user_data) {
++  FlEngine* self = FL_ENGINE(user_data);
++
++  if (self->frame_clock_view != nullptr && gtk_widget_get_realized(self->frame_clock_view)) {
++    if (self->tick_callback_id == 0) {
++      self->tick_callback_id = gtk_widget_add_tick_callback(
++          self->frame_clock_view, fl_engine_on_tick_cb, self, nullptr);
++    }
++    gtk_widget_queue_draw(self->frame_clock_view);
++  } else {
++    if (self->bootstrap_timer_id == 0) {
++      self->bootstrap_timer_id = g_timeout_add(16, fl_engine_bootstrap_timer_cb, self);
++    }
++  }
++  return G_SOURCE_REMOVE;
++}
++
++static void fl_engine_vsync_callback(void* user_data, intptr_t baton) {
++  FlEngine* self = FL_ENGINE(user_data);
++  gboolean need_schedule = FALSE;
++  {
++    g_autoptr(GMutexLocker) locker = g_mutex_locker_new(&self->vsync_mutex);
++    need_schedule = self->vsync_batons->len == 0;
++    g_array_append_val(self->vsync_batons, baton);
++  }
++
++  if (need_schedule) {
++    g_idle_add_full(G_PRIORITY_HIGH, fl_engine_schedule_vsync_on_main, g_object_ref(self), g_object_unref);
++  }
+ }
+ 
+ gboolean fl_engine_start(FlEngine* self, GError** error) {
+@@ -878,6 +1056,7 @@
+   args.dart_entrypoint_argv =
+       reinterpret_cast<const char* const*>(dart_entrypoint_args);
+   args.engine_id = reinterpret_cast<int64_t>(self);
++  args.vsync_callback = fl_engine_vsync_callback;
+ 
+   FlutterCompositor compositor = {};
+   compositor.struct_size = sizeof(FlutterCompositor);
+@@ -1596,3 +1775,55 @@
+   g_return_val_if_fail(FL_IS_ENGINE(self), nullptr);
+   return self->mouse_cursor_handler;
+ }
++
++void fl_engine_set_frame_clock_view(FlEngine* self, GtkWidget* view_widget) {
++  g_return_if_fail(FL_IS_ENGINE(self));
++
++  if (self->tick_callback_id != 0 && self->frame_clock_view != nullptr) {
++    gtk_widget_remove_tick_callback(self->frame_clock_view, self->tick_callback_id);
++    self->tick_callback_id = 0;
++  }
++
++  self->frame_clock_view = view_widget;
++
++  if (view_widget != nullptr && gtk_widget_get_realized(view_widget)) {
++    if (self->bootstrap_timer_id != 0) {
++      g_source_remove(self->bootstrap_timer_id);
++      self->bootstrap_timer_id = 0;
++    }
++    g_autoptr(GMutexLocker) locker = g_mutex_locker_new(&self->vsync_mutex);
++    if (self->vsync_batons->len != 0 && self->tick_callback_id == 0) {
++      self->tick_callback_id = gtk_widget_add_tick_callback(
++          self->frame_clock_view, fl_engine_on_tick_cb, self, nullptr);
++    }
++  }
++}
++
++uint64_t fl_engine_get_vsync_dispatched_count(FlEngine* self) {
++  g_return_val_if_fail(FL_IS_ENGINE(self), 0);
++  return self->vsync_dispatched_count;
++}
++
++extern "C" {
++
++G_MODULE_EXPORT intptr_t fl_engine_initialize_dart_api_dl(void* data) {
++  return Dart_InitializeApiDL(data);
++}
++
++#ifdef TSUMIRU_NATIVE_TESTING
++G_MODULE_EXPORT void fl_test_ffi_isolate_scope_callback(void (*cb)(int), int value) {
++  Dart_Isolate raw_isolate = Dart_CurrentIsolate_DL != nullptr ? Dart_CurrentIsolate_DL() : nullptr;
++  g_message("[FFI TEST] Current raw isolate: %p, entering IsolateScope...", raw_isolate);
++  flutter::Isolate isolate = flutter::Isolate::Current();
++  {
++    flutter::IsolateScope scope(isolate);
++    g_message("[FFI TEST] Inside IsolateScope! Calling Dart callback with %d...", value);
++    if (cb != nullptr) {
++      cb(value);
++    }
++  }
++  g_message("[FFI TEST] Exited IsolateScope successfully!");
++}
++#endif
++
++}
+--- a/flutter/shell/platform/linux/fl_engine_private.h
++++ b/flutter/shell/platform/linux/fl_engine_private.h
+@@ -639,6 +639,12 @@
+  */
+ FlEngine* fl_engine_for_id(int64_t handle);
+ 
++void fl_engine_set_frame_clock_view(FlEngine* engine, GtkWidget* view_widget);
++uint64_t fl_engine_get_vsync_dispatched_count(FlEngine* engine);
++
++G_MODULE_EXPORT intptr_t fl_engine_initialize_dart_api_dl(void* data);
++G_MODULE_EXPORT void fl_test_ffi_isolate_scope_callback(void (*cb)(int), int value);
++
+ G_END_DECLS
+ 
+ #endif  // FLUTTER_SHELL_PLATFORM_LINUX_FL_ENGINE_PRIVATE_H_
+--- a/flutter/shell/platform/linux/fl_opengl_manager.cc
++++ b/flutter/shell/platform/linux/fl_opengl_manager.cc
+@@ -24,6 +24,9 @@
+ 
+   // Context used by platform thread.
+   EGLContext platform_context;
++
++  // Selected EGLConfig.
++  EGLConfig config;
+ };
+ 
+ G_DEFINE_TYPE(FlOpenGLManager, fl_opengl_manager, G_TYPE_OBJECT)
+@@ -67,6 +70,7 @@
+   EGLConfig config = nullptr;
+   EGLint num_config = 0;
+   eglChooseConfig(self->display, config_attributes, &config, 1, &num_config);
++  self->config = config;
+ 
+   const EGLint context_attributes[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+ 
+@@ -114,3 +118,18 @@
+   return eglMakeCurrent(self->display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                         EGL_NO_CONTEXT) == EGL_TRUE;
+ }
++
++EGLDisplay fl_opengl_manager_get_egl_display(FlOpenGLManager* self) {
++  g_return_val_if_fail(FL_IS_OPENGL_MANAGER(self), nullptr);
++  return self->display;
++}
++
++EGLContext fl_opengl_manager_get_render_context(FlOpenGLManager* self) {
++  g_return_val_if_fail(FL_IS_OPENGL_MANAGER(self), nullptr);
++  return self->render_context;
++}
++
++EGLConfig fl_opengl_manager_get_egl_config(FlOpenGLManager* self) {
++  g_return_val_if_fail(FL_IS_OPENGL_MANAGER(self), nullptr);
++  return self->config;
++}
+--- a/flutter/shell/platform/linux/fl_opengl_manager.h
++++ b/flutter/shell/platform/linux/fl_opengl_manager.h
+@@ -64,6 +64,12 @@
+  */
+ gboolean fl_opengl_manager_clear_current(FlOpenGLManager* manager);
+ 
++#include <epoxy/egl.h>
++
++EGLDisplay fl_opengl_manager_get_egl_display(FlOpenGLManager* manager);
++EGLContext fl_opengl_manager_get_render_context(FlOpenGLManager* manager);
++EGLConfig fl_opengl_manager_get_egl_config(FlOpenGLManager* manager);
++
+ G_END_DECLS
+ 
+ #endif  // FLUTTER_SHELL_PLATFORM_LINUX_FL_OPENGL_MANAGER_H_
+--- a/flutter/shell/platform/linux/fl_view.cc
++++ b/flutter/shell/platform/linux/fl_view.cc
+@@ -511,6 +511,8 @@
+   g_clear_object(&self->zoom_gesture);
+   g_clear_object(&self->rotate_gesture);
+   if (self->engine != nullptr) {
++    fl_engine_set_frame_clock_view(self->engine, nullptr);
++
+     // If this view holds the text input focus, clear the handler's widget
+     // pointer so it does not dangle once this view is finalized.
+     FlTextInputHandler* text_input_handler =
+@@ -545,6 +547,18 @@
+ 
+   // Realize the child widgets.
+   gtk_widget_realize(GTK_WIDGET(self->renderer));
++
++  if (self->engine != nullptr) {
++    fl_engine_set_frame_clock_view(self->engine, widget);
++  }
++}
++
++static void fl_view_unrealize(GtkWidget* widget) {
++  FlView* self = FL_VIEW(widget);
++  if (self->engine != nullptr) {
++    fl_engine_set_frame_clock_view(self->engine, nullptr);
++  }
++  GTK_WIDGET_CLASS(fl_view_parent_class)->unrealize(widget);
+ }
+ 
+ static gboolean handle_key_event(FlView* self, GdkEventKey* key_event) {
+@@ -606,13 +620,21 @@
+   return handle_key_event(self, key_event);
+ }
+ 
++static void fl_view_finalize(GObject* object) {
++  auto* self = FL_VIEW(object);
++  g_clear_object(&self->renderer);
++  G_OBJECT_CLASS(fl_view_parent_class)->finalize(object);
++}
++
+ static void fl_view_class_init(FlViewClass* klass) {
+   GObjectClass* object_class = G_OBJECT_CLASS(klass);
+   object_class->notify = fl_view_notify;
+   object_class->dispose = fl_view_dispose;
++  object_class->finalize = fl_view_finalize;
+ 
+   GtkWidgetClass* widget_class = GTK_WIDGET_CLASS(klass);
+   widget_class->realize = fl_view_realize;
++  widget_class->unrealize = fl_view_unrealize;
+   widget_class->focus_in_event = fl_view_focus_in_event;
+   widget_class->key_press_event = fl_view_key_press_event;
+   widget_class->key_release_event = fl_view_key_release_event;
+@@ -647,6 +669,8 @@
+   self->renderer = fl_view_renderer_new(self->engine, self->sized_to_content);
+   gtk_widget_show(GTK_WIDGET(self->renderer));
+   gtk_container_add(GTK_CONTAINER(self->event_box), GTK_WIDGET(self->renderer));
++  // A raster callback keeps the view alive after GTK has disposed its children.
++  g_object_ref(self->renderer);
+   g_signal_connect_swapped(self->renderer, "realize", G_CALLBACK(realize_cb),
+                            self);
+   g_signal_connect_swapped(self->renderer, "size-allocate",
+--- a/flutter/shell/platform/linux/fl_view_renderer.cc
++++ b/flutter/shell/platform/linux/fl_view_renderer.cc
+@@ -4,7 +4,19 @@
+ 
+ #include "flutter/shell/platform/linux/fl_view_renderer.h"
+ 
++#include <cstring>
++#include <gmodule.h>
+ #include <gdk/gdkwayland.h>
++#include <wayland-client.h>
++#include <wayland-egl.h>
++#include <epoxy/egl.h>
++#include <epoxy/gl.h>
++#include "presentation-time-client-protocol.h"
++
++static void presentation_clock(void*, struct wp_presentation*, uint32_t clock_id) {
++  g_message("Presentation feedback clock %u", clock_id);
++}
++static const struct wp_presentation_listener kPresentationListener = {presentation_clock};
+ 
+ #include "flutter/shell/platform/linux/fl_compositor.h"
+ #include "flutter/shell/platform/linux/fl_compositor_opengl.h"
+@@ -18,7 +30,7 @@
+   // Engine this widget is rendering.
+   FlEngine* engine;
+ 
+-  // Rendering context when using OpenGL.
++  // Rendering context when using OpenGL on X11.
+   GdkGLContext* render_context;
+ 
+   // Combines layers into frame.
+@@ -32,6 +44,18 @@
+ 
+   // TRUE if have got the first frame to render.
+   gboolean have_first_frame;
++
++  // Wayland subsurface direct presentation:
++  gboolean is_wayland_subsurface;
++  struct wl_compositor* wl_compositor;
++  struct wl_subcompositor* wl_subcompositor;
++  struct wl_surface* child_surface;
++  struct wl_subsurface* child_subsurface;
++  struct wl_egl_window* egl_window;
++  EGLSurface egl_surface;
++  EGLDisplay egl_display;
++  FlWaylandSurface* surface;
++  struct wp_presentation* presentation;
+ };
+ 
+ enum { SIGNAL_FIRST_FRAME, LAST_SIGNAL };
+@@ -39,12 +63,44 @@
+ static guint fl_view_renderer_signals[LAST_SIGNAL];
+ 
+ G_DEFINE_TYPE(FlViewRenderer, fl_view_renderer, GTK_TYPE_DRAWING_AREA)
++
++static void close_subsurface(FlViewRenderer* self);
++
++static void wl_registry_handle_global(void* data,
++                                      struct wl_registry* registry,
++                                      uint32_t id,
++                                      const char* interface,
++                                      uint32_t version) {
++  FlViewRenderer* self = FL_VIEW_RENDERER(data);
++  if (strcmp(interface, wl_compositor_interface.name) == 0) {
++    self->wl_compositor = static_cast<struct wl_compositor*>(
++        wl_registry_bind(registry, id, &wl_compositor_interface, version < 4 ? version : 4));
++  } else if (strcmp(interface, wl_subcompositor_interface.name) == 0) {
++    self->wl_subcompositor = static_cast<struct wl_subcompositor*>(
++        wl_registry_bind(registry, id, &wl_subcompositor_interface, 1));
++  } else if (strcmp(interface, wp_presentation_interface.name) == 0 &&
++             g_getenv("TSUMIRU_NATIVE_TRACE") != nullptr) {
++    self->presentation = static_cast<struct wp_presentation*>(
++        wl_registry_bind(registry, id, &wp_presentation_interface, 1));
++    wp_presentation_add_listener(self->presentation, &kPresentationListener, nullptr);
++  }
++}
++
++static void wl_registry_handle_global_remove(void* data,
++                                             struct wl_registry* registry,
++                                             uint32_t id) {}
++
++static const struct wl_registry_listener kRegistryListener = {
++    wl_registry_handle_global,
++    wl_registry_handle_global_remove,
++};
+ 
+ // Redraw the view from the GTK thread.
+ static gboolean redraw_cb(gpointer user_data) {
+   g_autoptr(FlViewRenderer) self = FL_VIEW_RENDERER(user_data);
+-
+-  if (self->compositor == nullptr) {
++  GtkWidget* render_widget = GTK_WIDGET(self);
++
++  if (self->compositor == nullptr || !gtk_widget_get_realized(render_widget)) {
+     return G_SOURCE_REMOVE;
+   }
+ 
+@@ -55,7 +111,6 @@
+ 
+   // If Flutter is controlling the window size, then resize the view if
+   // necessary.
+-  GtkWidget* render_widget = GTK_WIDGET(self);
+   GtkAllocation allocation;
+   gtk_widget_get_allocation(render_widget, &allocation);
+   gint scale_factor = gtk_widget_get_scale_factor(render_widget);
+@@ -76,16 +131,110 @@
+     return G_SOURCE_REMOVE;
+   }
+ 
+-  gtk_widget_queue_draw(render_widget);
++  // When Wayland subsurface is active, frames present directly to the compositor.
++  // Do NOT queue draw on GTK Cairo clock to prevent redundant renders and lock contention.
++  if (!self->is_wayland_subsurface) {
++    gtk_widget_queue_draw(render_widget);
++  }
+ 
+   return G_SOURCE_REMOVE;
+ }
+ 
+ static void setup_opengl(FlViewRenderer* self) {
++  GtkWidget* widget = GTK_WIDGET(self);
++  GdkDisplay* display = gtk_widget_get_display(widget);
++
++  if (GDK_IS_WAYLAND_DISPLAY(display)) {
++    GtkWidget* parent_widget = gtk_widget_get_toplevel(widget);
++    GdkWindow* window = gtk_widget_get_window(parent_widget);
++    struct wl_display* wl_disp = gdk_wayland_display_get_wl_display(display);
++    struct wl_surface* parent_surface = nullptr;
++    if (window != nullptr) {
++      parent_surface = gdk_wayland_window_get_wl_surface(window);
++    }
++    if (parent_surface == nullptr) {
++      GtkWidget* toplevel = gtk_widget_get_toplevel(widget);
++      if (toplevel != nullptr && gtk_widget_get_window(toplevel) != nullptr) {
++        parent_surface = gdk_wayland_window_get_wl_surface(gtk_widget_get_window(toplevel));
++      }
++    }
++
++    if (parent_surface != nullptr && wl_disp != nullptr) {
++      struct wl_registry* registry = wl_display_get_registry(wl_disp);
++      struct wl_event_queue* registry_queue = wl_display_create_queue(wl_disp);
++      wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(registry), registry_queue);
++      wl_registry_add_listener(registry, &kRegistryListener, self);
++      wl_display_roundtrip_queue(wl_disp, registry_queue);
++      wl_registry_destroy(registry);
++      if (self->wl_compositor) wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(self->wl_compositor), nullptr);
++      if (self->wl_subcompositor) wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(self->wl_subcompositor), nullptr);
++      if (self->presentation) wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(self->presentation), nullptr);
++      wl_event_queue_destroy(registry_queue);
++
++      if (self->wl_compositor != nullptr && self->wl_subcompositor != nullptr) {
++        self->child_surface = wl_compositor_create_surface(self->wl_compositor);
++        self->child_subsurface = wl_subcompositor_get_subsurface(
++            self->wl_subcompositor, self->child_surface, parent_surface);
++
++        wl_subsurface_set_desync(self->child_subsurface);
++
++        gint x = 0, y = 0;
++        GtkWidget* toplevel = gtk_widget_get_toplevel(widget);
++        if (toplevel != nullptr) {
++          gtk_widget_translate_coordinates(widget, toplevel, 0, 0, &x, &y);
++        }
++        wl_subsurface_set_position(self->child_subsurface, x, y);
++
++        // Empty input region so GTK receives pointer/touch/scroll events directly.
++        struct wl_region* region = wl_compositor_create_region(self->wl_compositor);
++        wl_surface_set_input_region(self->child_surface, region);
++        wl_region_destroy(region);
++
++        GtkAllocation alloc;
++        gtk_widget_get_allocation(widget, &alloc);
++        gint scale = gtk_widget_get_scale_factor(widget);
++        int w = alloc.width > 0 ? alloc.width * scale : 800;
++        int h = alloc.height > 0 ? alloc.height * scale : 600;
++
++        self->egl_window = wl_egl_window_create(self->child_surface, w, h);
++
++        FlOpenGLManager* opengl_manager = fl_engine_get_opengl_manager(self->engine);
++        EGLDisplay egl_disp = fl_opengl_manager_get_egl_display(opengl_manager);
++        self->egl_display = egl_disp;
++        EGLConfig egl_cfg = fl_opengl_manager_get_egl_config(opengl_manager);
++
++        self->egl_surface = eglCreateWindowSurface(
++            egl_disp, egl_cfg, reinterpret_cast<EGLNativeWindowType>(self->egl_window), nullptr);
++        wl_surface_set_buffer_scale(self->child_surface, scale);
++
++        if (self->egl_surface != EGL_NO_SURFACE) {
++          self->is_wayland_subsurface = TRUE;
++          if (!self->compositor) {
++            auto* compositor = FL_COMPOSITOR(fl_compositor_opengl_new(
++                fl_engine_get_task_runner(self->engine), opengl_manager, TRUE));
++            g_atomic_pointer_set(&self->compositor, compositor);
++          }
++          self->surface = fl_wayland_surface_new(opengl_manager, self->egl_window,
++              self->egl_surface, self->child_surface, self->child_subsurface,
++              self->presentation);
++          self->presentation = nullptr;
++          fl_compositor_opengl_set_subsurface(
++              FL_COMPOSITOR_OPENGL(self->compositor), self->surface);
++
++          if (g_getenv("TSUMIRU_NATIVE_TRACE")) g_message("[HIGH-REFRESH WAYLAND] Subsurface initialized successfully: %dx%d (scale %d) at (%d, %d)",
++                    w, h, scale, x, y);
++          return;
++        }
++      }
++    }
++    close_subsurface(self);
++    g_warning("[HIGH-REFRESH WAYLAND] Subsurface setup failed, falling back to standard GDK GL path");
++  }
++
++  // Standard / X11 fallback path:
+   g_autoptr(GError) error = nullptr;
+-
+   self->render_context = gdk_window_create_gl_context(
+-      gtk_widget_get_window(GTK_WIDGET(self)), &error);
++      gtk_widget_get_window(widget), &error);
+   if (self->render_context == nullptr) {
+     g_warning("Failed to create OpenGL context: %s", error->message);
+     return;
+@@ -96,19 +245,21 @@
+     return;
+   }
+ 
+-  // If using Wayland, then EGL is in use and we can access the frame
+-  // from the Flutter context using EGLImage. If not (i.e. X11 using GLX)
+-  // then we have to copy the texture via the CPU.
+-  gboolean shareable =
+-      GDK_IS_WAYLAND_DISPLAY(gtk_widget_get_display(GTK_WIDGET(self)));
+-  self->compositor = FL_COMPOSITOR(fl_compositor_opengl_new(
+-      fl_engine_get_task_runner(self->engine),
+-      fl_engine_get_opengl_manager(self->engine), shareable));
++  gboolean shareable = GDK_IS_WAYLAND_DISPLAY(display);
++  if (!self->compositor) {
++    auto* compositor = FL_COMPOSITOR(fl_compositor_opengl_new(
++        fl_engine_get_task_runner(self->engine),
++        fl_engine_get_opengl_manager(self->engine), shareable));
++    g_atomic_pointer_set(&self->compositor, compositor);
++  }
+ }
+ 
+ static void setup_software(FlViewRenderer* self) {
+-  self->compositor = FL_COMPOSITOR(
+-      fl_compositor_software_new(fl_engine_get_task_runner(self->engine)));
++  if (!self->compositor) {
++    auto* compositor = FL_COMPOSITOR(
++        fl_compositor_software_new(fl_engine_get_task_runner(self->engine)));
++    g_atomic_pointer_set(&self->compositor, compositor);
++  }
+ }
+ 
+ static void paint_background(FlViewRenderer* self, cairo_t* cr) {
+@@ -141,15 +292,41 @@
+   }
+ }
+ 
++// Implements GtkWidget::size_allocate.
++static void fl_view_renderer_size_allocate(GtkWidget* widget,
++                                           GtkAllocation* allocation) {
++  FlViewRenderer* self = FL_VIEW_RENDERER(widget);
++
++  GTK_WIDGET_CLASS(fl_view_renderer_parent_class)->size_allocate(widget, allocation);
++
++  if (self->is_wayland_subsurface && self->child_subsurface != nullptr) {
++    gint x = 0, y = 0;
++    GtkWidget* toplevel = gtk_widget_get_toplevel(widget);
++    if (toplevel != nullptr) {
++      gtk_widget_translate_coordinates(widget, toplevel, 0, 0, &x, &y);
++    }
++    wl_subsurface_set_position(self->child_subsurface, x, y);
++
++    gint scale = gtk_widget_get_scale_factor(widget);
++    wl_surface_set_buffer_scale(self->child_surface, scale);
++  }
++}
++
+ // Implements GtkWidget::draw.
+ static gboolean fl_view_renderer_draw(GtkWidget* widget, cairo_t* cr) {
+   FlViewRenderer* self = FL_VIEW_RENDERER(widget);
+ 
+   paint_background(self, cr);
+ 
++  // When Wayland subsurface is active, frame is presented directly to compositor via EGL.
++  if (self->is_wayland_subsurface) {
++    return TRUE;
++  }
++
+   // The compositor is created when the widget is realized; if it is not yet
+   // available there is nothing to render beyond the background.
+-  if (self->compositor == nullptr) {
++  auto* compositor = static_cast<FlCompositor*>(g_atomic_pointer_get(&self->compositor));
++  if (compositor == nullptr) {
+     return TRUE;
+   }
+ 
+@@ -168,6 +345,56 @@
+   return result;
+ }
+ 
++static void close_subsurface(FlViewRenderer* self) {
++  if (self->compositor != nullptr && FL_IS_COMPOSITOR_OPENGL(self->compositor)) {
++    fl_compositor_opengl_set_subsurface(
++        FL_COMPOSITOR_OPENGL(self->compositor), nullptr);
++  }
++  if (self->surface) {
++    g_clear_pointer(&self->surface, fl_wayland_surface_unref);
++    self->egl_surface = EGL_NO_SURFACE;
++    self->egl_window = nullptr;
++    self->child_subsurface = nullptr;
++    self->child_surface = nullptr;
++  }
++  if (self->egl_surface != EGL_NO_SURFACE) {
++    eglDestroySurface(self->egl_display, self->egl_surface);
++    self->egl_surface = EGL_NO_SURFACE;
++  }
++  if (self->egl_window != nullptr) {
++    wl_egl_window_destroy(self->egl_window);
++    self->egl_window = nullptr;
++  }
++  if (self->child_subsurface != nullptr) {
++    wl_subsurface_destroy(self->child_subsurface);
++    self->child_subsurface = nullptr;
++  }
++  if (self->child_surface != nullptr) {
++    wl_surface_destroy(self->child_surface);
++    self->child_surface = nullptr;
++  }
++  if (self->wl_subcompositor != nullptr) {
++    wl_subcompositor_destroy(self->wl_subcompositor);
++    self->wl_subcompositor = nullptr;
++  }
++  if (self->wl_compositor != nullptr) {
++    wl_compositor_destroy(self->wl_compositor);
++    self->wl_compositor = nullptr;
++  }
++  if (self->presentation) {
++    wp_presentation_destroy(self->presentation);
++    self->presentation = nullptr;
++  }
++  self->is_wayland_subsurface = FALSE;
++}
++
++static void fl_view_renderer_unrealize(GtkWidget* widget) {
++  auto* self = FL_VIEW_RENDERER(widget);
++  close_subsurface(self);
++  g_clear_object(&self->render_context);
++  GTK_WIDGET_CLASS(fl_view_renderer_parent_class)->unrealize(widget);
++}
++
+ static void fl_view_renderer_dispose(GObject* object) {
+   FlViewRenderer* self = FL_VIEW_RENDERER(object);
+ 
+@@ -181,11 +408,8 @@
+ static void fl_view_renderer_finalize(GObject* object) {
+   FlViewRenderer* self = FL_VIEW_RENDERER(object);
+ 
+-  // The compositor is released here rather than in dispose() so it outlives a
+-  // forced dispose (e.g. gtk_widget_destroy()) and is only freed once the last
+-  // reference is dropped. This keeps it alive for the raster thread, which
+-  // holds a strong reference on the view (and thus this renderer) while
+-  // presenting.
++  // Raster presentation keeps the view alive until its native resources are no longer in use.
++  close_subsurface(self);
+   g_clear_object(&self->compositor);
+ 
+   G_OBJECT_CLASS(fl_view_renderer_parent_class)->finalize(object);
+@@ -197,6 +421,8 @@
+ 
+   GtkWidgetClass* widget_class = GTK_WIDGET_CLASS(klass);
+   widget_class->realize = fl_view_renderer_realize;
++  widget_class->unrealize = fl_view_renderer_unrealize;
++  widget_class->size_allocate = fl_view_renderer_size_allocate;
+   widget_class->draw = fl_view_renderer_draw;
+ 
+   fl_view_renderer_signals[SIGNAL_FIRST_FRAME] =
+@@ -208,6 +434,13 @@
+   GdkRGBA default_background = {
+       .red = 0.0, .green = 0.0, .blue = 0.0, .alpha = 1.0};
+   self->background_color = gdk_rgba_copy(&default_background);
++  self->is_wayland_subsurface = FALSE;
++  self->wl_compositor = nullptr;
++  self->wl_subcompositor = nullptr;
++  self->child_surface = nullptr;
++  self->child_subsurface = nullptr;
++  self->egl_window = nullptr;
++  self->egl_surface = EGL_NO_SURFACE;
+ }
+ 
+ FlViewRenderer* fl_view_renderer_new(FlEngine* engine,
+@@ -235,14 +468,48 @@
+                                      size_t layers_count) {
+   g_return_if_fail(FL_IS_VIEW_RENDERER(self));
+ 
+-  // Frames may be presented before the widget is realized and the compositor
+-  // is set up; ignore them.
+-  if (self->compositor == nullptr) {
++  auto* compositor = static_cast<FlCompositor*>(g_atomic_pointer_get(&self->compositor));
++  if (compositor == nullptr) {
+     return;
+   }
+ 
+-  fl_compositor_present_layers(self->compositor, layers, layers_count);
+-
+-  // Perform the redraw in the GTK thread.
++  fl_compositor_present_layers(compositor, layers, layers_count);
++
+   g_idle_add(redraw_cb, g_object_ref(self));
+ }
++
++#ifdef TSUMIRU_NATIVE_TESTING
++static GtkWidget* find_test_renderer(GtkWidget* widget) {
++  if (FL_IS_VIEW_RENDERER(widget)) return widget;
++  if (!GTK_IS_CONTAINER(widget)) return nullptr;
++  GList* children = gtk_container_get_children(GTK_CONTAINER(widget));
++  GtkWidget* found = nullptr;
++  for (GList* item = children; item && !found; item = item->next) {
++    found = find_test_renderer(GTK_WIDGET(item->data));
++  }
++  g_list_free(children);
++  return found;
++}
++
++extern "C" G_MODULE_EXPORT void fl_test_cycle_surface() {
++  g_idle_add([](gpointer) -> gboolean {
++    GList* windows = gtk_window_list_toplevels();
++    GtkWidget* widget = nullptr;
++    for (GList* item = windows; item && !widget; item = item->next) {
++      widget = find_test_renderer(GTK_WIDGET(item->data));
++    }
++    g_list_free(windows);
++    if (!widget) return G_SOURCE_REMOVE;
++    auto* self = FL_VIEW_RENDERER(widget);
++    g_autoptr(FlWaylandSurface) retained = fl_wayland_surface_ref(self->surface);
++    close_subsurface(self);
++    EGLint width = 0;
++    if (!retained || !eglQuerySurface(retained->display, retained->surface, EGL_WIDTH, &width)) {
++      g_error("Surface retain check failed during recreation");
++    }
++    setup_opengl(self);
++    g_message("Native surface cycle complete");
++    return G_SOURCE_REMOVE;
++  }, nullptr);
++}
++#endif
+--- /dev/null
++++ b/flutter/shell/platform/linux/fl_wayland_surface.cc
+@@ -0,0 +1,41 @@
++// Copyright 2026 The Flutter Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "fl_wayland_surface.h"
++#include "presentation-time-client-protocol.h"
++
++FlWaylandSurface* fl_wayland_surface_new(FlOpenGLManager* manager,
++                                        wl_egl_window* window,
++                                        EGLSurface surface,
++                                        wl_surface* child,
++                                        wl_subsurface* subsurface,
++                                        wp_presentation* presentation) {
++  auto* self = g_new0(FlWaylandSurface, 1);
++  g_atomic_ref_count_init(&self->references);
++  self->manager = FL_OPENGL_MANAGER(g_object_ref(manager));
++  self->display = fl_opengl_manager_get_egl_display(manager);
++  self->window = window;
++  self->surface = surface;
++  self->child = child;
++  self->subsurface = subsurface;
++  self->presentation = presentation;
++  return self;
++}
++
++FlWaylandSurface* fl_wayland_surface_ref(FlWaylandSurface* self) {
++  if (self) g_atomic_ref_count_inc(&self->references);
++  return self;
++}
++
++void fl_wayland_surface_unref(FlWaylandSurface* self) {
++  if (!self || !g_atomic_ref_count_dec(&self->references)) return;
++  eglDestroySurface(self->display, self->surface);
++  wl_egl_window_destroy(self->window);
++  wl_subsurface_destroy(self->subsurface);
++  wl_surface_destroy(self->child);
++  if (self->presentation) wp_presentation_destroy(self->presentation);
++  g_object_unref(self->manager);
++  if (g_getenv("TSUMIRU_NATIVE_TRACE")) g_message("Native Wayland surface released");
++  g_free(self);
++}
+--- /dev/null
++++ b/flutter/shell/platform/linux/fl_wayland_surface.h
+@@ -0,0 +1,40 @@
++// Copyright 2026 The Flutter Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef FLUTTER_SHELL_PLATFORM_LINUX_FL_WAYLAND_SURFACE_H_
++#define FLUTTER_SHELL_PLATFORM_LINUX_FL_WAYLAND_SURFACE_H_
++
++#include <epoxy/egl.h>
++#include <wayland-client.h>
++#include <wayland-egl.h>
++#include "flutter/shell/platform/linux/fl_opengl_manager.h"
++
++G_BEGIN_DECLS
++
++struct wp_presentation;
++
++struct FlWaylandSurface {
++  gatomicrefcount references;
++  FlOpenGLManager* manager;
++  EGLDisplay display;
++  EGLSurface surface;
++  wl_egl_window* window;
++  wl_surface* child;
++  wl_subsurface* subsurface;
++  wp_presentation* presentation;
++};
++
++FlWaylandSurface* fl_wayland_surface_new(FlOpenGLManager* manager,
++                                        wl_egl_window* window,
++                                        EGLSurface surface,
++                                        wl_surface* child,
++                                        wl_subsurface* subsurface,
++                                        wp_presentation* presentation);
++FlWaylandSurface* fl_wayland_surface_ref(FlWaylandSurface* self);
++void fl_wayland_surface_unref(FlWaylandSurface* self);
++G_DEFINE_AUTOPTR_CLEANUP_FUNC(FlWaylandSurface, fl_wayland_surface_unref)
++
++G_END_DECLS
++
++#endif
+--- a/flutter/shell/platform/common/isolate_scope.cc
++++ b/flutter/shell/platform/common/isolate_scope.cc
+@@ -4,36 +4,45 @@
+ 
+ #include "flutter/shell/platform/common/isolate_scope.h"
+ 
++#include "flutter/fml/logging.h"
++#include "dart_api_dl.h"
++
+ namespace flutter {
+ 
+ Isolate Isolate::Current() {
+-  Dart_Isolate isolate = Dart_CurrentIsolate();
++  FML_CHECK(Dart_CurrentIsolate_DL != nullptr)
++      << "Dart API DL is not initialized! Call Dart_InitializeApiDL(NativeApi.initializeApiDLData) before creating an Isolate.";
++  Dart_Isolate isolate = Dart_CurrentIsolate_DL();
+   return Isolate(isolate);
+ }
+ 
+ IsolateScope::IsolateScope(const Isolate& isolate) {
++  FML_CHECK(Dart_CurrentIsolate_DL != nullptr && Dart_EnterIsolate_DL != nullptr && Dart_ExitIsolate_DL != nullptr)
++      << "Dart API DL is not initialized! Call Dart_InitializeApiDL(NativeApi.initializeApiDLData) before creating an IsolateScope.";
+   isolate_ = isolate.isolate_;
+-  previous_ = Dart_CurrentIsolate();
++  previous_ = Dart_CurrentIsolate_DL();
+   if (previous_ == isolate_) {
+     return;
+   }
+   if (previous_) {
+-    Dart_ExitIsolate();
++    Dart_ExitIsolate_DL();
+   }
+-  Dart_EnterIsolate(isolate_);
+-};
++  Dart_EnterIsolate_DL(isolate_);
++}
+ 
+ IsolateScope::~IsolateScope() {
+-  Dart_Isolate current = Dart_CurrentIsolate();
++  FML_CHECK(Dart_CurrentIsolate_DL != nullptr && Dart_EnterIsolate_DL != nullptr && Dart_ExitIsolate_DL != nullptr)
++      << "Dart API DL is not initialized in IsolateScope destructor.";
++  Dart_Isolate current = Dart_CurrentIsolate_DL();
+   FML_DCHECK(!current || current == isolate_);
+   if (previous_ == isolate_) {
+     return;
+   }
+   if (current) {
+-    Dart_ExitIsolate();
++    Dart_ExitIsolate_DL();
+   }
+   if (previous_) {
+-    Dart_EnterIsolate(previous_);
++    Dart_EnterIsolate_DL(previous_);
+   }
+ }
+ 
+--- a/flutter/shell/platform/common/isolate_scope.h
++++ b/flutter/shell/platform/common/isolate_scope.h
+@@ -3,7 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "flutter/fml/logging.h"
+-#include "third_party/dart/runtime/include/dart_api.h"
++#include "dart_api.h"
+ 
+ #ifndef FLUTTER_SHELL_PLATFORM_COMMON_ISOLATE_SCOPE_H_
+ #define FLUTTER_SHELL_PLATFORM_COMMON_ISOLATE_SCOPE_H_
