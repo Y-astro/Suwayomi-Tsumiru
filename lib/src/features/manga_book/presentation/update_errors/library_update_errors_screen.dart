@@ -12,6 +12,7 @@ import '../../../../constants/app_sizes.dart';
 import '../../../../routes/router_config.dart';
 import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../utils/theme/brand.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/desktop/desktop_top_bar.dart';
 import '../../../../widgets/emoticons.dart';
 import '../../../../widgets/manga_cover/list/manga_cover_list_tile.dart';
@@ -41,7 +42,7 @@ class LibraryUpdateErrorsScreen extends ConsumerWidget {
             ),
       body: failed.showUiWhenData(
         context,
-        (mangas) => RefreshIndicator(
+        (mangas) => AppRefreshIndicator(
           onRefresh: () {
             ref.invalidate(failedUpdateCountProvider);
             return ref.refresh(failedUpdatesProvider.future);

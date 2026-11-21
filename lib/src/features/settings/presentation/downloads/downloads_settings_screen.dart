@@ -8,6 +8,7 @@ import '../../../../utils/misc/toast/toast.dart';
 import '../../../../utils/motion/reduce_motion.dart';
 import '../../../../utils/webui_meta/webui_meta_codec.dart';
 import '../../../../utils/webui_meta/webui_settings.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/desktop/desktop_top_bar.dart';
 import '../../../../widgets/emoticons.dart';
 import '../../../../widgets/input_popup/domain/settings_prop_type.dart';
@@ -123,7 +124,7 @@ class _ServerDownloadsTab extends ConsumerWidget {
     );
     final categories =
         ref.watch(categoryControllerProvider).value ?? const <CategoryDto>[];
-    return RefreshIndicator(
+    return AppRefreshIndicator(
       onRefresh: () async {
         ref.invalidate(userSettingsProvider);
         ref.invalidate(settingsProvider);

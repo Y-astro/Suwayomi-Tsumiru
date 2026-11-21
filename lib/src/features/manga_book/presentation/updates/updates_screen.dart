@@ -18,6 +18,7 @@ import '../../../../routes/router_config.dart';
 import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../utils/hooks/paging_controller_hook.dart';
 import '../../../../utils/motion/reduce_motion.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/custom_circular_progress_indicator.dart';
 import '../../../../widgets/desktop/desktop_page_frame.dart';
 import '../../../../widgets/desktop/desktop_top_bar.dart';
@@ -975,7 +976,7 @@ class UpdatesScreen extends HookConsumerWidget {
         children: [
           ?selectionHeader,
           Expanded(
-            child: RefreshIndicator(
+            child: AppRefreshIndicator(
               onRefresh: () async => resetList(),
               child: CustomScrollView(
                 slivers: [

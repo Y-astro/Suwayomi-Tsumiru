@@ -13,6 +13,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../../../../routes/router_config.dart';
 import '../../../../../utils/extensions/custom_extensions.dart';
+import '../../../../../widgets/app_refresh_indicator.dart';
 import '../../../../../widgets/desktop/desktop_page_frame.dart';
 import '../../../../../widgets/emoticons.dart';
 import '../../../../../widgets/shell/update_banner_state.dart';
@@ -92,7 +93,7 @@ class LibrarySectionsView extends HookConsumerWidget {
       // Group changes shift the section at the current offset.
     }, [scrollController, sections.length]);
 
-    return RefreshIndicator(
+    return AppRefreshIndicator(
       onRefresh: () async {
         ref.read(viewOfflineNowProvider.notifier).set(false);
         ref.read(serverUnreachableProvider.notifier).set(false);

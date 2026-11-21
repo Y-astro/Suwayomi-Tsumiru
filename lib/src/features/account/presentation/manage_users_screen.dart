@@ -8,6 +8,7 @@ import '../../../graphql/__generated__/schema.graphql.dart';
 import '../../../routes/router_config.dart';
 import '../../../utils/extensions/custom_extensions.dart';
 import '../../../utils/motion/reduce_motion.dart';
+import '../../../widgets/app_refresh_indicator.dart';
 import '../../../widgets/desktop/desktop_top_bar.dart';
 import '../../../widgets/shell/detail_navigation_shell_screen.dart';
 import '../../../widgets/web_selection_area.dart';
@@ -115,7 +116,7 @@ class ManageUsersScreen extends HookConsumerWidget {
                       Expanded(
                         child: users!.showUiWhenData(
                           context,
-                          (data) => RefreshIndicator(
+                          (data) => AppRefreshIndicator(
                             onRefresh: refresh,
                             child: ListView(
                               padding: settingsPagePadding(context),

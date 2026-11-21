@@ -10,6 +10,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../utils/misc/toast/toast.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/desktop/desktop_top_bar.dart';
 import '../../../../widgets/emoticons.dart';
 import '../../../../widgets/shell/detail_navigation_shell_screen.dart';
@@ -54,7 +55,7 @@ class EditCategoryScreen extends HookConsumerWidget {
             ),
           );
         } else {
-          return RefreshIndicator(
+          return AppRefreshIndicator(
             onRefresh: () => ref.refresh(categoryControllerProvider.future),
             child: Center(
               child: ConstrainedBox(

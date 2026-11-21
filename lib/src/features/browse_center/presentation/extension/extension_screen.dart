@@ -13,6 +13,7 @@ import '../../../../constants/language_list.dart';
 import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../utils/misc/app_utils.dart';
 import '../../../../utils/misc/toast/toast.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/emoticons.dart';
 import '../../../../widgets/search_field.dart';
 import '../../domain/extension/extension_model.dart';
@@ -169,7 +170,7 @@ class ExtensionScreen extends HookConsumerWidget {
                 ),
           ],
         );
-        return RefreshIndicator(
+        return AppRefreshIndicator(
           onRefresh: refresh,
           child: desktop
               ? Padding(

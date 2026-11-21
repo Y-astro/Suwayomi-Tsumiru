@@ -10,6 +10,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../../../graphql/__generated__/schema.graphql.dart';
 import '../../../../routes/router_config.dart';
 import '../../../../utils/extensions/custom_extensions.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/desktop/desktop_top_bar.dart';
 import '../../../../widgets/input_popup/domain/settings_prop_type.dart';
 import '../../../../widgets/input_popup/settings_prop_tile.dart';
@@ -43,7 +44,7 @@ class BrowseSettingsScreen extends ConsumerWidget {
       appBar: topBar
           ? null
           : AppBar(leading: detailNavigationBackButton(context), title: title),
-      body: RefreshIndicator(
+      body: AppRefreshIndicator(
         onRefresh: onRefresh,
         child: ListTileTheme(
           data: ListTileThemeData(

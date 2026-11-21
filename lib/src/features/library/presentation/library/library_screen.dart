@@ -20,6 +20,7 @@ import '../../../../routes/router_config.dart';
 import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../utils/misc/toast/toast.dart';
 import '../../../../utils/motion/reduce_motion.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/desktop/desktop_page_frame.dart';
 import '../../../../widgets/desktop/desktop_top_bar.dart';
 import '../../../../widgets/emoticons.dart';
@@ -1450,7 +1451,7 @@ class _GroupedMangaList extends ConsumerWidget {
           return Emoticons(title: context.l10n.noCategoryMangaFound);
         }
         final items = data;
-        return RefreshIndicator(
+        return AppRefreshIndicator(
           // Grouped tabs have no single category; pull checks the whole library.
           onRefresh: () async {
             ref.read(updateOptimisticProvider.notifier).arm();

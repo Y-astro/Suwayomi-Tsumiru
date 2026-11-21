@@ -74,22 +74,22 @@ void main() {
       await tester.sendEventToBinding(mouse.scroll(const Offset(0, 53.0)));
       await tester.pump(const Duration(milliseconds: 16));
 
-      // With smooth wheel follower active, frame 1 does not jump instantly to 53px
+      // With smooth wheel follower active, frame 1 does not jump instantly to the full target
       final frame1 = controller.position.pixels;
       expect(frame1, greaterThan(0.0));
       expect(
         frame1,
-        lessThan(53.0),
-        reason: 'Expected gradual easing rather than 53px instant jump',
+        lessThan(90.1),
+        reason: 'Expected gradual easing rather than an instant jump',
       );
 
       await tester.pump(const Duration(milliseconds: 16));
       final frame2 = controller.position.pixels;
       expect(frame2, greaterThan(frame1));
-      expect(frame2, lessThan(53.0));
+      expect(frame2, lessThan(90.1));
 
       await tester.pumpAndSettle();
-      expect(controller.position.pixels, closeTo(53.0, 0.01));
+      expect(controller.position.pixels, closeTo(90.1, 0.01));
     });
 
     testWidgets('cumulative small notches and direction reversal', (
@@ -130,7 +130,7 @@ void main() {
       await tester.sendEventToBinding(mouse.scroll(const Offset(0, -30.0)));
       await tester.pumpAndSettle();
 
-      expect(controller.position.pixels, closeTo(30.0, 0.01));
+      expect(controller.position.pixels, closeTo(51.0, 0.01));
     });
 
     testWidgets('actual nested-scroll target resolution (resolves innermost)', (
@@ -186,13 +186,13 @@ void main() {
       );
 
       await tester.pumpAndSettle();
-      expect(innerController.position.pixels, closeTo(53.0, 0.01));
+      expect(innerController.position.pixels, closeTo(90.1, 0.01));
       expect(outerController.position.pixels, 0.0);
       innerController.jumpTo(innerController.position.maxScrollExtent);
       await tester.pump();
       await tester.sendEventToBinding(mouse.scroll(const Offset(0, 53)));
       await tester.pumpAndSettle();
-      expect(outerController.offset, closeTo(53, 0.01));
+      expect(outerController.offset, closeTo(90.1, 0.01));
       expect(innerController.offset, innerController.position.maxScrollExtent);
     });
 
@@ -291,9 +291,9 @@ void main() {
   ) async {
     final controller = await _pumpList(tester, reducedMotion: true);
     await _sendWheel(tester, 53);
-    expect(controller.offset, 53);
+    expect(controller.offset, 90.1);
     await tester.pumpAndSettle();
-    expect(controller.offset, 53);
+    expect(controller.offset, 90.1);
   });
 
   testWidgets('outside main navigation the wheel behavior stays unchanged', (

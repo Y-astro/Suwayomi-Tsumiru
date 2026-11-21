@@ -10,6 +10,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../../../../constants/enum.dart';
 import '../../../../../utils/extensions/custom_extensions.dart';
+import '../../../../../widgets/app_refresh_indicator.dart';
 import '../../../../../widgets/desktop/desktop_page_frame.dart';
 import '../../../../../widgets/emoticons.dart';
 import '../../../../offline/data/offline_download_providers.dart';
@@ -53,7 +54,7 @@ class SmallScreenMangaDetails extends ConsumerWidget {
     final listMode = ref.watch(mangaChapterListModeProvider(mangaId: mangaId));
     final chapterCount =
         chapterEntries?.whereType<MangaChapterEntry>().length ?? 0;
-    return RefreshIndicator(
+    return AppRefreshIndicator(
       onRefresh: () => onRefresh(true),
       child: DesktopFullBleedScroll(
         child: CustomScrollView(

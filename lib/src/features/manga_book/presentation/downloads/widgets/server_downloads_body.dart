@@ -9,6 +9,7 @@ import '../../../../../routes/router_config.dart';
 import '../../../../../utils/extensions/custom_extensions.dart';
 import '../../../../../utils/misc/app_utils.dart';
 import '../../../../../utils/misc/toast/toast.dart';
+import '../../../../../widgets/app_refresh_indicator.dart';
 import '../../../../../widgets/desktop/desktop_page_frame.dart';
 import '../../../../../widgets/emoticons.dart';
 import '../../../../../widgets/fluent_expansion_tile.dart';
@@ -313,7 +314,7 @@ class ServerDownloadsBody extends HookConsumerWidget {
           Future<void> onRefresh() => ref.refresh(downloadStatusProvider.future);
           if (desktop) {
             return DesktopCentredColumn(
-              child: RefreshIndicator(
+              child: AppRefreshIndicator(
                 onRefresh: onRefresh,
                 child: SingleChildScrollView(
                   physics: const AlwaysScrollableScrollPhysics(),
@@ -385,7 +386,7 @@ class ServerDownloadsBody extends HookConsumerWidget {
             );
           }
           if (!grouped) {
-            return RefreshIndicator(
+            return AppRefreshIndicator(
               onRefresh: onRefresh,
               child: ReorderableListView.builder(
                 buildDefaultDragHandles: false,
@@ -421,7 +422,7 @@ class ServerDownloadsBody extends HookConsumerWidget {
               ),
             );
           }
-          return RefreshIndicator(
+          return AppRefreshIndicator(
             onRefresh: onRefresh,
             child: SingleChildScrollView(
               padding: const EdgeInsets.only(bottom: 88),

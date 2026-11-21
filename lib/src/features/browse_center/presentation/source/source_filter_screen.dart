@@ -11,6 +11,7 @@ import '../../../../constants/app_sizes.dart';
 import '../../../../constants/language_list.dart';
 import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../utils/misc/toast/toast.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/compact_switch.dart';
 import '../../../../widgets/desktop/desktop_top_bar.dart';
 import '../../../../widgets/emoticons.dart';
@@ -85,7 +86,7 @@ class SourceFilterScreen extends HookConsumerWidget {
           );
         }
 
-        return RefreshIndicator(
+        return AppRefreshIndicator(
           onRefresh: refresh,
           child: CustomScrollView(
             slivers: [

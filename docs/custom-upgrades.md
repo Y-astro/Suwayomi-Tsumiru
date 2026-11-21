@@ -7,6 +7,9 @@ unless explicitly requested. Push completed, verified changes to the user's fork
    main navigation. The user clarified that touchpad scrolling is bad only in
    Library; Updates and History touchpad behavior is fine. The reader is perfect:
    do not change its files, settings or behavior. Preserve native high refresh.
+   Follow-up: optimize cached-cover rendering, match main mouse-wheel distance
+   to the reader default, and disable desktop pull-to-refresh while retaining
+   explicit update controls.
 2. **Library update errors and bounded retries — queued.** Correct stale error
    markers after a successful title refresh and synchronization with the latest
    chapters. Retry error-marked titles at one hour and two hours after the main

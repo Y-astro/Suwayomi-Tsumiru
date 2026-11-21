@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../../../utils/extensions/custom_extensions.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/desktop/desktop_top_bar.dart';
 import '../../../../widgets/shell/detail_navigation_shell_screen.dart';
 import '../../controller/server_controller.dart';
@@ -26,7 +27,7 @@ class BackupScreen extends ConsumerWidget {
       appBar: topBar
           ? null
           : AppBar(leading: detailNavigationBackButton(context), title: title),
-      body: RefreshIndicator(
+      body: AppRefreshIndicator(
         onRefresh: () => ref.refresh(settingsProvider.future),
         child: ListTileTheme(
           data: ListTileThemeData(

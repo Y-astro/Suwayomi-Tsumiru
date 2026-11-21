@@ -24,6 +24,7 @@ import '../../web_route_link.dart';
 import '../providers/manga_cover_providers.dart';
 import '../widgets/continue_reading_button.dart';
 import '../widgets/manga_badges.dart';
+import 'cover_scrim_decoration.dart';
 
 const double _kBookAspectRatio = 2 / 3;
 
@@ -376,23 +377,25 @@ class _MangaCoverGridTileState extends State<MangaCoverGridTile> {
     }
 
     final Widget image = Container(
-      foregroundDecoration: BoxDecoration(
-        border: Border.all(width: 0, color: context.theme.canvasColor),
-        boxShadow: widget.showDarkOverlay
-            ? [
-                BoxShadow(
-                  color: context.theme.canvasColor.withValues(alpha: .5),
-                ),
-              ]
-            : null,
-        gradient: _overlayTitle
-            ? const LinearGradient(
-                begin: Alignment(0, 1 / 3),
-                end: Alignment.bottomCenter,
-                colors: [Colors.transparent, OnImage.scrim],
-              )
-            : null,
-      ),
+      foregroundDecoration: _overlayTitle && !widget.showDarkOverlay
+          ? CoverScrimDecoration(borderColor: context.theme.canvasColor)
+          : BoxDecoration(
+            border: Border.all(width: 0, color: context.theme.canvasColor),
+            boxShadow: widget.showDarkOverlay
+                ? [
+                    BoxShadow(
+                      color: context.theme.canvasColor.withValues(alpha: .5),
+                    ),
+                  ]
+                : null,
+            gradient: _overlayTitle
+                ? const LinearGradient(
+                    begin: Alignment(0, 1 / 3),
+                    end: Alignment.bottomCenter,
+                    colors: [Colors.transparent, OnImage.scrim],
+                  )
+                : null,
+          ),
       // Decode at tile size to keep full-resolution covers from exhausting the image-cache budget.
       child: LayoutBuilder(
         builder: (context, constraints) => ServerImage(

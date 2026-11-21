@@ -35,3 +35,19 @@ native high-refresh embedder and Flutter widget tests. No new dependencies.
 - [x] Build and smoke the release app with local content and isolated data.
 - [x] Review the diff, verify reader and native sources unchanged, commit and
       push to the fork without a PR, then deploy a verified stable launcher build.
+
+
+## Follow-up after the user's feel check
+
+- [x] Reproduce cached-cover rendering separately from network loading, using
+      the real cover widget, actual app theme and compositor feedback.
+- [x] Discard shadow, title-row, gradient-removal and cache-hint experiments;
+      retain the measured shared-texture scrim after pixel comparisons.
+- [x] Increase main-navigation wheel distance from 1.0 to 1.7 without touching
+      reader preferences or History's trackpad path.
+- [x] Disable desktop pull-to-refresh throughout main-app sections. Preserve
+      mobile pull gestures and explicit update controls; verify real input.
+- [x] Run all 997 tests, scoped analysis and a native release build.
+
+Evidence and limits: `docs/architecture/cover-grid-performance.md`. Physical
+full-library feel remains the user's acceptance check. Items 2–5 stay queued.

@@ -10,6 +10,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../../../graphql/__generated__/schema.graphql.dart';
 import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../utils/network/graphql_errors.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/desktop/desktop_top_bar.dart';
 import '../../../../widgets/server_unreachable_view.dart';
 import '../../../../widgets/shell/detail_navigation_shell_screen.dart';
@@ -72,7 +73,7 @@ class ServerSettingsPageShell extends ConsumerWidget {
       appBar: topBar
           ? null
           : AppBar(leading: detailNavigationBackButton(context), title: title),
-      body: RefreshIndicator(
+      body: AppRefreshIndicator(
         onRefresh: onRefresh,
         child: ListTileTheme(
           data: ListTileThemeData(

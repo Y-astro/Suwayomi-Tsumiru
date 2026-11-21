@@ -11,6 +11,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../../../constants/language_list.dart';
 import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../utils/misc/toast/toast.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/emoticons.dart';
 import '../../../quick_open/presentation/unified_search/phone_search_view.dart';
 import '../../../settings/presentation/library/widgets/persistent_search_bar/persistent_search_bar.dart';
@@ -74,7 +75,7 @@ class SourceScreen extends HookConsumerWidget {
         );
       }
       if (context.usesDesktopShell) {
-        return RefreshIndicator(
+        return AppRefreshIndicator(
           onRefresh: refresh,
           child: Padding(
             padding: const EdgeInsets.only(bottom: 16),
@@ -152,7 +153,7 @@ class SourceScreen extends HookConsumerWidget {
           ),
         );
       }
-      return RefreshIndicator(
+      return AppRefreshIndicator(
         onRefresh: refresh,
         child: CustomScrollView(
           slivers: [

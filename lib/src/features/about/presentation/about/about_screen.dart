@@ -19,6 +19,7 @@ import '../../../../routes/router_config.dart';
 import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../utils/launch_url_in_web.dart';
 import '../../../../utils/misc/toast/toast.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/desktop/desktop_top_bar.dart';
 import '../../../../widgets/shell/detail_navigation_shell_screen.dart';
 import '../../../../widgets/tsumiru_logo.dart';
@@ -147,7 +148,7 @@ class AboutScreen extends HookConsumerWidget {
           ? null
           : AppBar(leading: detailNavigationBackButton(context), title: title),
       body: WebSelectionArea(
-        child: RefreshIndicator(
+        child: AppRefreshIndicator(
           onRefresh: () => ref.refresh(aboutProvider.future),
           child: Center(
             child: ConstrainedBox(

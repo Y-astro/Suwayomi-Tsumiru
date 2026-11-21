@@ -16,6 +16,7 @@ import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../utils/misc/app_utils.dart';
 import '../../../../utils/misc/toast/toast.dart';
 import '../../../../utils/motion/reduce_motion.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/compact_switch.dart';
 import '../../../../widgets/desktop/desktop_top_bar.dart';
 import '../../../../widgets/emoticons.dart';
@@ -72,7 +73,7 @@ class LibrarySettingsScreen extends ConsumerWidget {
                 leading: detailNavigationBackButton(context),
                 title: title,
               ),
-        body: RefreshIndicator(
+        body: AppRefreshIndicator(
           onRefresh: () async {
             ref.invalidate(userSettingsProvider);
             ref.invalidate(settingsProvider);

@@ -16,6 +16,7 @@ import '../../../../routes/router_config.dart';
 import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../utils/misc/toast/toast.dart';
 import '../../../../utils/motion/reduce_motion.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/confirm_bulk_download_dialog.dart';
 import '../../../../widgets/download_presets_menu.dart';
 import '../../../../widgets/emoticons.dart';
@@ -206,7 +207,7 @@ class CategoryMangaList extends HookConsumerWidget {
               MangaRoute(mangaId: manga.id, categoryId: categoryId).location,
         );
 
-        final list = RefreshIndicator(
+        final list = AppRefreshIndicator(
           // The spinner waits for the immediate re-read; update completion triggers another refresh.
           onRefresh: () async {
             // Only a user gesture may clear the offline pin, never the mount effect.

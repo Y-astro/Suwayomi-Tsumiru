@@ -16,6 +16,7 @@ import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../utils/hooks/paging_controller_hook.dart';
 import '../../../../utils/motion/reduce_motion.dart';
 import '../../../../utils/webui_meta/webui_settings.dart';
+import '../../../../widgets/app_refresh_indicator.dart';
 import '../../../../widgets/desktop/desktop_top_bar.dart';
 import '../../../../widgets/desktop/desktop_view_switch.dart';
 import '../../../../widgets/search_field.dart';
@@ -291,7 +292,7 @@ class SourceMangaListScreen extends HookConsumerWidget {
               ),
           ],
         );
-        final listBody = RefreshIndicator(
+        final listBody = AppRefreshIndicator(
           onRefresh: () async => refresh(),
           child: SourceMangaDisplayView(
             sourceId: sourceId,

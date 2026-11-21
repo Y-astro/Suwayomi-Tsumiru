@@ -15,6 +15,7 @@ import '../../../../../constants/enum.dart';
 import '../../../../../routes/router_config.dart';
 import '../../../../../utils/extensions/custom_extensions.dart';
 import '../../../../../utils/motion/reduce_motion.dart';
+import '../../../../../widgets/app_refresh_indicator.dart';
 import '../../../../../widgets/desktop/desktop_page_frame.dart';
 import '../../../../../widgets/emoticons.dart';
 import '../../../../offline/data/offline_download_providers.dart';
@@ -178,7 +179,7 @@ class BigScreenMangaDetails extends HookConsumerWidget {
       );
     }
     previousWide.value = wide;
-    return RefreshIndicator(
+    return AppRefreshIndicator(
       onRefresh: () => onRefresh(true),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,

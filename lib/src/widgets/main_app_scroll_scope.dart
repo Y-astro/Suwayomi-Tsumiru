@@ -108,7 +108,7 @@ class _MainAppScrollScopeState extends State<MainAppScrollScope> {
       fit: StackFit.passthrough,
       children: [
         MouseWheelSpeed(
-          speed: 1.0,
+          speed: 1.7,
           axis: Axis.vertical,
           reverse: false,
           positionOf: () => _position,
