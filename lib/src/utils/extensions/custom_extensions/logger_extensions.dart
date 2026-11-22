@@ -73,10 +73,6 @@ extension OperationExt on Operation {
 
 extension RequestExt on Request {
   void log() {
-    final buffer = StringBuffer()
-      ..writeln("Variables($variables)")
-      ..writeln(context)
-      ..write(operation.logString());
-    logger.i(buffer);
+    logger.i('GraphQL request operation=${operation.operationName ?? 'unnamed'}');
   }
 }

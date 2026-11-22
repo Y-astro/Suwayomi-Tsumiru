@@ -7,8 +7,10 @@
 /// Web no-op: there's no filesystem to write a crash log to.
 Future<String?> initCrashLog() async => null;
 
-void writeCrashLog(String? path, String content) {}
+Future<void> writeCrashLog(String? path, String content) async {}
 
-String? readCrashLog(String? path) => null;
+Future<String?> readCrashLog(String? path) async => null;
 
-void clearCrashLog(String? path) {}
+Future<void> clearCrashLog(String? path) async {}
+
+Future<void> flushCrashLog(String? path) async {}

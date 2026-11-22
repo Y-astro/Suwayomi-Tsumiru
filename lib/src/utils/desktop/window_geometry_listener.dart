@@ -9,6 +9,7 @@ import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../crash/diagnostics.dart';
 import 'window_geometry.dart';
 import 'window_geometry_store.dart';
 
@@ -73,6 +74,11 @@ class WindowGeometryListener with WindowListener {
       await _flush().timeout(const Duration(seconds: 2));
     } catch (_) {
     } finally {
+      recordDiagnostic('[${DateTime.now().toIso8601String()}] lifecycle window_close\n');
+      try {
+        await flushDiagnostics().timeout(const Duration(seconds: 2));
+      } catch (_) {
+      }
       await windowManager.destroy();
     }
   }

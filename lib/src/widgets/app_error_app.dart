@@ -48,7 +48,7 @@ class AppErrorApp extends StatelessWidget {
                     const SizedBox(height: 20),
                     FilledButton.icon(
                       onPressed: () async {
-                        final log = crashLogForClipboard(logPath) ?? message;
+                        final log = await crashLogForClipboard(logPath) ?? message;
                         await Clipboard.setData(ClipboardData(text: log));
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(

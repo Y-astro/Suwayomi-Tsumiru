@@ -5,6 +5,7 @@
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 import 'dart:async';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:app_links/app_links.dart';
 import 'package:connectivity_plus_linux_portal/connectivity_plus_linux_portal.dart';
@@ -79,6 +80,7 @@ import 'src/widgets/cover_cache/cover_cache.dart';
 
 // Native crash-log path; null on web or initialization failure.
 String? _crashLogPath;
+AppLifecycleListener? _diagnosticLifecycle;
 
 bool _appRendered = false;
 
@@ -427,7 +429,28 @@ void _logBoot(String stage) {
 // Error handlers must never throw while reporting a startup failure.
 Future<void> _setUpCrashReporting() async {
   _crashLogPath = await initCrashLog();
-  setDiagnosticSink((line) => writeCrashLog(_crashLogPath, line));
+  setDiagnosticSink(
+    (line) => writeCrashLog(_crashLogPath, line),
+    flush: () => flushCrashLog(_crashLogPath),
+  );
+  final print = debugPrint;
+  debugPrint = (message, {wrapWidth}) => print(
+    message == null ? null : redactTokens(message), wrapWidth: wrapWidth,
+  );
+  _diagnosticLifecycle?.dispose();
+  _diagnosticLifecycle = AppLifecycleListener(
+    onStateChange: (state) => recordDiagnostic(
+      '[${DateTime.now().toIso8601String()}] lifecycle state=${state.name}\n',
+    ),
+    onExitRequested: () async {
+      recordDiagnostic('[${DateTime.now().toIso8601String()}] lifecycle exit_requested\n');
+      await flushCrashLog(_crashLogPath);
+      return AppExitResponse.exit;
+    },
+  );
+  recordDiagnostic(
+    '[${DateTime.now().toIso8601String()}] lifecycle initial=${WidgetsBinding.instance.lifecycleState?.name ?? 'unknown'}\n',
+  );
   FlutterError.onError = (details) {
     FlutterError.presentError(details);
     _logCrash(details.exception, details.stack);

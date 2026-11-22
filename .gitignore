@@ -3,6 +3,7 @@ lib/util_scripts
 sym_*
 *.class
 *.log
+/logs/
 *.pyc
 *.swp
 .DS_Store

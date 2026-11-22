@@ -28,7 +28,7 @@ class CopyCrashLogTile extends ConsumerWidget {
         icon: const Icon(FluentIcons.delete_24_regular),
         tooltip: context.l10n.clearCrashLog,
         onPressed: () async {
-          clearCrashLog(await initCrashLog());
+          await clearCrashLog(await initCrashLog());
           if (context.mounted) {
             ref.read(toastProvider)?.show(context.l10n.crashLogCleared);
           }
@@ -45,7 +45,7 @@ class CopyCrashLogTile extends ConsumerWidget {
           serverVersion: serverVersion ?? 'unknown',
           platform: currentPlatformDescription(),
         );
-        final log = crashLogForClipboard(await initCrashLog(), header: header);
+        final log = await crashLogForClipboard(await initCrashLog(), header: header);
         if (!context.mounted) return;
         final toast = ref.read(toastProvider);
         if (log == null) {

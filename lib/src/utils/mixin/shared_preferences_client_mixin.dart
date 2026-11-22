@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../constants/db_keys.dart';
 import '../../global_providers/global_providers.dart';
+import '../crash/diagnostics.dart';
 import '../extensions/custom_extensions.dart';
 
 /// Call initialize in build; T must be non-nullable and initial may override the key default.
@@ -66,6 +67,7 @@ mixin SharedPreferenceClientMixin<T extends Object> {
   void _persistenceRefreshLogic() => listenSelf((_, next) => _set(next));
 
   Future<bool> _set(T? value) async {
+    recordDiagnostic('[${DateTime.now().toIso8601String()}] settings key=$_key action=${value == null ? 'remove' : 'write'}\n');
     if (value == null) return _client.remove(_key);
     if (_toJson != null) {
       _client.setString(_key, jsonEncode(_toJson(value)));
@@ -119,6 +121,7 @@ mixin SharedPreferenceEnumClientMixin<T extends Enum> {
   T? get _get => _getEnumFromIndex(_client.getInt(_key));
 
   Future<bool> _set(int? value) {
+    recordDiagnostic('[${DateTime.now().toIso8601String()}] settings key=$_key action=${value == null ? 'remove' : 'write'}\n');
     if (value == null) return _client.remove(_key);
     return _client.setInt(_key, value);
   }

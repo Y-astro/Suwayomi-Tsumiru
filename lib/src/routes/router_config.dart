@@ -70,6 +70,7 @@ import '../features/settings/presentation/settings/settings_screen.dart';
 import '../features/settings/presentation/settings/settings_window.dart';
 import '../features/settings/presentation/sync/sync_screen.dart';
 import '../features/tracking/presentation/settings/tracking_settings_screen.dart';
+import '../utils/crash/diagnostics.dart';
 import '../utils/extensions/custom_extensions.dart';
 import '../utils/motion/reduce_motion.dart';
 import '../widgets/desktop/desktop_page_frame.dart';
@@ -177,7 +178,7 @@ GoRouter routerConfig(Ref ref) {
   ref.onDispose(() => shellState.shell = null);
   final router = GoRouter(
     routes: $appRoutes,
-    debugLogDiagnostics: true,
+    debugLogDiagnostics: false,
     initialLocation: const LibraryRoute(categoryId: 0).location,
     navigatorKey: rootNavigatorKey,
     redirect: (context, state) {
@@ -202,6 +203,16 @@ GoRouter routerConfig(Ref ref) {
       return null;
     },
   );
+  String? previousRoute;
+  void logRoute() {
+    // The route template excludes query values, user text, and path parameters.
+    final route = router.routerDelegate.currentConfiguration.fullPath;
+    if (route == previousRoute) return;
+    previousRoute = route;
+    recordDiagnostic('[${DateTime.now().toIso8601String()}] navigation route=$route\n');
+  }
+  router.routerDelegate.addListener(logRoute);
+  ref.onDispose(() => router.routerDelegate.removeListener(logRoute));
   ref.onDispose(router.dispose);
   return router;
 }

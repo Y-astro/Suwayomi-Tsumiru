@@ -19,7 +19,7 @@ String crashLogHeader({
     '---\n';
 
 /// Redacts copyable logs, prepends header verbatim, and returns null when no readable log exists.
-String? crashLogForClipboard(String? path, {String? header}) {
-  final raw = readCrashLog(path);
+Future<String?> crashLogForClipboard(String? path, {String? header}) async {
+  final raw = await readCrashLog(path);
   return raw == null ? null : '${header ?? ''}${redactTokens(raw)}';
 }

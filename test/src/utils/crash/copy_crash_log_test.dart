@@ -11,7 +11,7 @@ import 'package:tsumiru/src/utils/crash/copy_crash_log.dart';
 
 void main() {
   group('crashLogForClipboard', () {
-    test('prepends the header and redacts the body', () {
+    test('prepends the header and redacts the body', () async {
       final dir = Directory.systemTemp.createTempSync('crashlog-');
       addTearDown(() => dir.deleteSync(recursive: true));
       final path = '${dir.path}/crash.log';
@@ -24,7 +24,7 @@ void main() {
           'Server: unknown\n'
           'Platform: web\n'
           '---\n';
-      final out = crashLogForClipboard(path, header: header)!;
+      final out = (await crashLogForClipboard(path, header: header))!;
 
       expect(out.startsWith(header), isTrue);
       expect(out, contains('token=<redacted>'));
@@ -37,7 +37,7 @@ void main() {
       // With no header the result is exactly the redacted log.
       final plain = '${dir.path}/plain.log';
       File(plain).writeAsStringSync('plain failure, no tokens\n');
-      expect(crashLogForClipboard(plain), 'plain failure, no tokens\n');
+      expect(await crashLogForClipboard(plain), 'plain failure, no tokens\n');
     });
   });
 }

@@ -1,45 +1,64 @@
-// Copyright (c) 2026 Contributors to the Suwayomi project
-//
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at http://mozilla.org/MPL/2.0/.
-
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tsumiru/src/utils/crash/crash_log_io.dart';
 
 void main() {
-  group('crash log', () {
-    test('append caps the file and keeps the most recent entries', () {
-      final dir = Directory.systemTemp.createTempSync('crashlog-');
-      addTearDown(() => dir.deleteSync(recursive: true));
-      final path = '${dir.path}/crash.log';
-
-      // Write well past the 256 KB cap (~5000 lines * ~45 bytes ≈ 225 KB…
-      // bump the count so we definitely trigger a trim).
-      for (var i = 0; i < 12000; i++) {
-        writeCrashLog(path, 'line $i with some padding to add a few bytes\n');
-      }
-
-      expect(
-        File(path).lengthSync(),
-        lessThanOrEqualTo(256 * 1024),
-        reason: 'the log must stay bounded',
-      );
-      final content = File(path).readAsStringSync();
-      expect(
-        content,
-        contains('line 11999'),
-        reason: 'the newest entry must survive the trim',
-      );
-      expect(
-        content,
-        isNot(contains('line 0 with')),
-        reason: 'the oldest entries must be dropped',
-      );
-      // Trim starts on a line boundary — no half entry at the top.
-      expect(content.startsWith('line '), isTrue);
-    });
+  late Directory directory;
+  late String path;
+  setUp(() {
+    directory = Directory.systemTemp.createTempSync('crashlog-');
+    path = '${directory.path}/crash.log';
   });
+  tearDown(() => directory.deleteSync(recursive: true));
+
+  test(
+    'writes are ordered before reads and credentials never reach disk',
+    () async {
+      final writes = [
+        for (var i = 0; i < 20; i++)
+          writeCrashLog(path, 'event=$i https://host?token=privateSecret'),
+      ];
+      final text = await readCrashLog(path);
+      await Future.wait(writes);
+      expect(text, contains('event=19'));
+      expect(text, isNot(contains('privateSecret')));
+      expect(text!.indexOf('event=0 '), lessThan(text.indexOf('event=19 ')));
+      expect(await File(path).readAsString(), isNot(contains('privateSecret')));
+    },
+  );
+
+  test('clear follows queued writes and new writes survive', () async {
+    final before = writeCrashLog(path, 'before clear');
+    final clear = clearCrashLog(path);
+    final after = writeCrashLog(path, 'after clear');
+    await Future.wait([before, clear, after]);
+    expect(await readCrashLog(path), 'after clear\n');
+  });
+
+  test('overload stays bounded and reports dropped events', () async {
+    final writes = [
+      for (var i = 0; i < 300; i++)
+        writeCrashLog(path, 'event=$i ${'x' * 10000}'),
+    ];
+    await Future.wait(writes);
+    final text = await readCrashLog(path);
+    expect(text, contains('event=299'));
+    expect(text, contains('logging: dropped'));
+    expect(text!.length, lessThan(400000));
+  });
+
+  test(
+    'missing or unwritable paths never escape into app error handlers',
+    () async {
+      await writeCrashLog(null, 'ignored');
+      expect(await readCrashLog(null), isNull);
+      await clearCrashLog(null);
+      final obstacle = File('${directory.path}/file');
+      await obstacle.writeAsString('unchanged');
+      await writeCrashLog('${obstacle.path}/log', 'failure');
+      expect(await readCrashLog('${obstacle.path}/log'), isNull);
+      expect(await obstacle.readAsString(), 'unchanged');
+    },
+  );
 }
