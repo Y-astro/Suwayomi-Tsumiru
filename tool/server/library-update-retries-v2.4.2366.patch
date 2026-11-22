@@ -1,0 +1,738 @@
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 343fa28..556dd58 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -22,7 +22,7 @@ allprojects {
+     repositories {
+         mavenCentral()
+         google()
+-        maven("https://github.com/Suwayomi/Suwayomi-Server/raw/android-jar/")
++        maven("https://raw.githubusercontent.com/Suwayomi/Suwayomi-Server/3983289d9481a8ba99c0b16350b27f41364906a2/")
+         maven("https://jitpack.io")
+         maven("https://jogamp.org/deployment/maven")
+         maven("https://packages.jetbrains.team/maven/p/ij/intellij-dependencies")
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/Manga.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/Manga.kt
+index fe5a268..56365ac 100644
+--- a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/Manga.kt
++++ b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/Manga.kt
+@@ -40,6 +40,7 @@ import org.jetbrains.exposed.v1.jdbc.transactions.suspendTransaction
+ import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+ import org.jetbrains.exposed.v1.jdbc.update
+ import suwayomi.tachidesk.manga.impl.download.fileProvider.impl.MissingThumbnailException
++import suwayomi.tachidesk.manga.impl.update.IUpdater
+ import suwayomi.tachidesk.manga.impl.util.network.await
+ import suwayomi.tachidesk.manga.impl.util.source.GetSource.getSourceOrNull
+ import suwayomi.tachidesk.manga.impl.util.source.GetSource.getSourceOrStub
+@@ -56,6 +57,8 @@ import suwayomi.tachidesk.manga.model.table.MangaMetaTable
+ import suwayomi.tachidesk.manga.model.table.MangaTable
+ import suwayomi.tachidesk.manga.model.table.toDataClass
+ import suwayomi.tachidesk.server.ApplicationDirs
++import uy.kohesive.injekt.Injekt
++import uy.kohesive.injekt.api.get
+ import uy.kohesive.injekt.injectLazy
+ import java.io.File
+ import java.io.IOException
+@@ -156,30 +159,45 @@ object Manga {
+         mangaId: Int,
+         updateManga: Boolean = true,
+         updateChapters: Boolean = true,
++    ) = updateMangaAndChaptersWithResult(mangaId, updateManga, updateChapters) {}
++
++    internal suspend fun updateMangaAndChaptersWithResult(
++        mangaId: Int,
++        updateManga: Boolean,
++        updateChapters: Boolean,
++        onResult: (Boolean) -> Unit,
+     ) {
+         mangaInfoMutex.get(mangaId) { Mutex() }.withLock {
+-            var mangaEntry =
+-                transaction { MangaTable.selectAll().where { MangaTable.id eq mangaId }.first() }
+-            val source =
+-                getSourceOrNull(mangaEntry[MangaTable.sourceReference])
+-                    ?: throw NullPointerException("Missing source ${mangaEntry[MangaTable.sourceReference]}")
+-            val mangaUpdate =
+-                fetchMangaAndChapters(
+-                    mangaEntry,
+-                    source,
+-                    fetchDetails = updateManga,
+-                    fetchChapters = updateChapters,
+-                )
+-
+-            if (updateManga) {
+-                updateMangaDatabase(mangaEntry, source, mangaUpdate.manga)
+-                mangaEntry =
+-                    transaction {
+-                        MangaTable.selectAll().where { MangaTable.id eq mangaId }.first()
+-                    }
+-            }
+-            if (updateChapters) {
+-                Chapter.updateChapterListDatabase(mangaEntry, mangaUpdate.chapters, source)
++            var succeeded = false
++            try {
++                var mangaEntry =
++                    transaction { MangaTable.selectAll().where { MangaTable.id eq mangaId }.first() }
++                val source =
++                    getSourceOrNull(mangaEntry[MangaTable.sourceReference])
++                        ?: throw NullPointerException("Missing source ${mangaEntry[MangaTable.sourceReference]}")
++                val mangaUpdate =
++                    fetchMangaAndChapters(
++                        mangaEntry,
++                        source,
++                        fetchDetails = updateManga,
++                        fetchChapters = updateChapters,
++                    )
++
++                if (updateManga) {
++                    updateMangaDatabase(mangaEntry, source, mangaUpdate.manga)
++                    mangaEntry =
++                        transaction {
++                            MangaTable.selectAll().where { MangaTable.id eq mangaId }.first()
++                        }
++                }
++                if (updateChapters) {
++                    Chapter.updateChapterListDatabase(mangaEntry, mangaUpdate.chapters, source)
++                    Injekt.get<IUpdater>().onChaptersSynced(mangaId)
++                }
++                succeeded = true
++            } finally {
++                // Record queue results before a later manual sync can acquire this title's mutex.
++                onResult(succeeded)
+             }
+         }
+     }
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/IUpdater.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/IUpdater.kt
+index a7ba6f7..df0e640 100644
+--- a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/IUpdater.kt
++++ b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/IUpdater.kt
+@@ -18,6 +18,8 @@ interface IUpdater {
+ 
+     fun addMangasToQueue(mangas: List<MangaDataClass>)
+ 
++    fun onChaptersSynced(mangaId: Int) {}
++
+     @Deprecated("Replaced with updates", replaceWith = ReplaceWith("updates"))
+     val status: Flow<UpdateStatus>
+ 
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/Updater.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/Updater.kt
+index fe4d61a..0726112 100644
+--- a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/Updater.kt
++++ b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/Updater.kt
+@@ -14,6 +14,7 @@ import kotlinx.coroutines.SupervisorJob
+ import kotlinx.coroutines.cancelChildren
+ import kotlinx.coroutines.channels.BufferOverflow
+ import kotlinx.coroutines.channels.Channel
++import kotlinx.coroutines.delay
+ import kotlinx.coroutines.flow.MutableSharedFlow
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.asStateFlow
+@@ -28,6 +29,12 @@ import kotlinx.coroutines.flow.update
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.sync.Semaphore
+ import kotlinx.coroutines.sync.withPermit
++import kotlinx.serialization.json.Json
++import org.jetbrains.exposed.v1.core.and
++import org.jetbrains.exposed.v1.core.eq
++import org.jetbrains.exposed.v1.core.inList
++import org.jetbrains.exposed.v1.jdbc.selectAll
++import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+ import suwayomi.tachidesk.global.impl.sync.SyncManager
+ import suwayomi.tachidesk.manga.impl.Category
+ import suwayomi.tachidesk.manga.impl.CategoryManga
+@@ -36,6 +43,8 @@ import suwayomi.tachidesk.manga.model.dataclass.CategoryDataClass
+ import suwayomi.tachidesk.manga.model.dataclass.IncludeOrExclude
+ import suwayomi.tachidesk.manga.model.dataclass.MangaDataClass
+ import suwayomi.tachidesk.manga.model.table.MangaStatus
++import suwayomi.tachidesk.manga.model.table.MangaTable
++import suwayomi.tachidesk.manga.model.table.toDataClass
+ import suwayomi.tachidesk.server.serverConfig
+ import suwayomi.tachidesk.util.HAScheduler
+ import uy.kohesive.injekt.Injekt
+@@ -90,6 +99,86 @@ class Updater : IUpdater {
+     private val lastAutomatedUpdateKey = "lastAutomatedGlobalUpdate"
+     private val preferences = Injekt.get<Application>().getSharedPreferences("server_util", Context.MODE_PRIVATE)
+ 
++    private val lifecycleLock = Any()
++
++    @Volatile private var updateGeneration = 0L
++    private var awaitingMainCompletion = false
++    private val retryKey = "libraryUpdateRetriesV1"
++    private val retries =
++        LibraryUpdateRetries(
++            initial =
++                runCatching {
++                    preferences.getString(retryKey, null)?.let { Json.decodeFromString<LibraryUpdateRetryState>(it) }
++                }.onFailure { logger.error(it) { "Cannot restore library retry plan" } }.getOrNull(),
++            save = { state ->
++                val editor = preferences.edit()
++                if (state == null) editor.remove(retryKey) else editor.putString(retryKey, Json.encodeToString(state))
++                if (!editor.commit()) logger.error { "Cannot persist library retry plan" }
++            },
++        )
++
++    private fun retryMangas(): List<MangaDataClass> =
++        transaction {
++            MangaTable
++                .selectAll()
++                .where { (MangaTable.id inList retries.failedIds) and (MangaTable.inLibrary eq true) }
++                .map { MangaTable.toDataClass(it) }
++        }
++
++    init {
++        synchronized(lifecycleLock) {
++            val restored = retryMangas()
++            retries.retain(restored.map { it.id }.toSet())
++            restored.forEach { tracker[it.id] = UpdateJob(it, JobStatus.FAILED) }
++        }
++        // Wall-clock deadlines survive Android sleep; this scope also survives updater reset.
++        notifyFlowScope.launch {
++            while (true) {
++                delay(30.seconds)
++                runCatching {
++                    synchronized(lifecycleLock) {
++                        val now = System.currentTimeMillis()
++                        if (!awaitingMainCompletion && !isRunning() && retries.nextDueAt?.let { now >= it } == true) {
++                            val mangas = retryMangas()
++                            retries.retain(mangas.map { it.id }.toSet())
++                            val due = retries.claimDue(now)
++                            if (due.isNotEmpty()) {
++                                logger.info { "Retrying ${due.size} library failures (attempt ${retries.snapshot?.attempts}/2)" }
++                                addMangasToQueue(mangas.filter { it.id in due })
++                            }
++                        }
++                    }
++                }.onFailure { logger.error(it) { "Library retry dispatch failed" } }
++            }
++        }
++    }
++
++    override fun onChaptersSynced(mangaId: Int) {
++        val changed =
++            synchronized(lifecycleLock) {
++                retries.chapterSynced(mangaId)
++                val job = tracker[mangaId] ?: return@synchronized null
++                if (job.status != JobStatus.FAILED) return@synchronized null
++                job.copy(status = JobStatus.COMPLETE).also { tracker[mangaId] = it }
++            }
++        if (changed != null) notifyFlowScope.launch { updateStatus(immediate = true, mangaUpdates = listOf(changed)) }
++    }
++
++    private fun finishMainIfIdle(): Boolean {
++        if (isRunning()) return false
++        if (awaitingMainCompletion) {
++            awaitingMainCompletion = false
++            retries.finishMainUpdate(
++                System.currentTimeMillis(),
++                tracker.values
++                    .filter { it.status == JobStatus.FAILED }
++                    .map { it.manga.id }
++                    .toSet(),
++            )
++        }
++        return true
++    }
++
+     private var currentUpdateTaskId = ""
+ 
+     init {
+@@ -274,58 +363,79 @@ class Updater : IUpdater {
+ 
+     private fun createUpdateChannel(source: String): Channel<UpdateJob> {
+         val channel = Channel<UpdateJob>(Channel.UNLIMITED)
++        val generation = updateGeneration
+         channel
+             .consumeAsFlow()
+             .onEach { job ->
+                 semaphore.withPermit {
+-                    process(job)
++                    process(job, generation)
+                 }
+             }.catch {
+                 logger.error(it) { "Error during updates (source: $source)" }
+-                handleChannelUpdateFailure(source)
+-            }.onCompletion { updateChannels.remove(source) }
++                handleChannelUpdateFailure(source, generation)
++            }.onCompletion { updateChannels.remove(source, channel) }
+             .launchIn(scope)
+         return channel
+     }
+ 
+-    private suspend fun handleChannelUpdateFailure(source: String) {
+-        val isFailedSourceUpdate = { job: UpdateJob ->
+-            val isForSource = job.manga.sourceId == source
+-            val hasFailed = job.status == JobStatus.FAILED
+-
+-            isForSource && hasFailed
+-        }
+-
+-        // fail all updates for source
+-        val sourceUpdateJobs = tracker.filter { (_, job) -> !isFailedSourceUpdate(job) }
+-        sourceUpdateJobs.forEach { (mangaId, job) -> tracker[mangaId] = job.copy(status = JobStatus.FAILED) }
+-
+-        updateStatus(mangaUpdates = sourceUpdateJobs.values.toList())
++    private suspend fun handleChannelUpdateFailure(
++        source: String,
++        generation: Long,
++    ) {
++        val failed =
++            synchronized(lifecycleLock) {
++                if (generation != updateGeneration) return
++                // A broken source channel must not mark other sources or completed jobs failed.
++                val jobs =
++                    tracker.values
++                        .filter {
++                            it.manga.sourceId == source && (it.status == JobStatus.PENDING || it.status == JobStatus.RUNNING)
++                        }.map { it.copy(status = JobStatus.FAILED) }
++                jobs.forEach { tracker[it.manga.id] = it }
++                finishMainIfIdle()
++                jobs
++            }
++        updateStatus(mangaUpdates = failed)
+     }
+ 
+-    private suspend fun process(job: UpdateJob) {
+-        tracker[job.manga.id] = job.copy(status = JobStatus.RUNNING)
+-        updateStatus(mangaUpdates = listOf(tracker[job.manga.id]!!))
++    private suspend fun process(
++        job: UpdateJob,
++        generation: Long,
++    ) {
++        val runningJob = job.copy(status = JobStatus.RUNNING)
++        synchronized(lifecycleLock) {
++            if (generation != updateGeneration) return
++            tracker[job.manga.id] = runningJob
++        }
++        updateStatus(mangaUpdates = listOf(runningJob))
+ 
+-        tracker[job.manga.id] =
+-            try {
+-                logger.info { "Updating ${job.manga}" }
+-                Manga.updateMangaAndChapters(
+-                    job.manga.id,
+-                    updateManga = serverConfig.updateMangas.value || !job.manga.initialized,
+-                )
+-                job.copy(status = JobStatus.COMPLETE)
+-            } catch (e: Exception) {
+-                logger.error(e) { "Error while updating ${job.manga}" }
+-                if (e is CancellationException) throw e
+-                job.copy(status = JobStatus.FAILED)
++        try {
++            logger.info { "Updating ${job.manga}" }
++            Manga.updateMangaAndChaptersWithResult(
++                job.manga.id,
++                updateManga = serverConfig.updateMangas.value || !job.manga.initialized,
++                updateChapters = true,
++            ) { succeeded ->
++                synchronized(lifecycleLock) {
++                    if (generation == updateGeneration) {
++                        tracker[job.manga.id] = job.copy(status = if (succeeded) JobStatus.COMPLETE else JobStatus.FAILED)
++                    }
++                }
+             }
++        } catch (e: Exception) {
++            logger.error(e) { "Error while updating ${job.manga}" }
++            if (e is CancellationException) throw e
++        }
+ 
+-        val wasLastJob = tracker.values.none { it.status == JobStatus.PENDING || it.status == JobStatus.RUNNING }
++        val (wasLastJob, completedJob) =
++            synchronized(lifecycleLock) {
++                if (generation != updateGeneration) return
++                finishMainIfIdle() to tracker.getValue(job.manga.id)
++            }
+ 
+         // in case this is the last update job, the running flag has to be true, before it gets set to false, to be able
+         // to properly clear the dataloader store in UpdateType
+-        updateStatus(immediate = wasLastJob, isRunning = true, mangaUpdates = listOf(tracker[job.manga.id]!!))
++        updateStatus(immediate = wasLastJob, isRunning = true, mangaUpdates = listOf(completedJob))
+ 
+         if (wasLastJob) {
+             updateStatus(isRunning = false)
+@@ -412,6 +522,11 @@ class Updater : IUpdater {
+                 return@launch
+             }
+ 
++            synchronized(lifecycleLock) {
++                retries.clear()
++                awaitingMainCompletion = true
++            }
++
+             scope.launch {
+                 updateStatus(
+                     categoryUpdates =
+@@ -432,10 +547,12 @@ class Updater : IUpdater {
+     }
+ 
+     override fun addMangasToQueue(mangas: List<MangaDataClass>) {
+-        // create all manga update jobs before adding them to the queue so that the client is able to calculate the
+-        // progress properly right form the start
+-        mangas.forEach { tracker[it.id] = UpdateJob(it) }
+-        mangas.forEach { addMangaToQueue(it) }
++        synchronized(lifecycleLock) {
++            // create all manga update jobs before adding them to the queue so that the client is able to calculate the
++            // progress properly right form the start
++            mangas.forEach { tracker[it.id] = UpdateJob(it) }
++            mangas.forEach { addMangaToQueue(it) }
++        }
+     }
+ 
+     private fun addMangaToQueue(manga: MangaDataClass) {
+@@ -446,19 +563,24 @@ class Updater : IUpdater {
+     }
+ 
+     override fun reset() {
+-        scope.coroutineContext.cancelChildren()
++        synchronized(lifecycleLock) {
++            updateGeneration++
++            awaitingMainCompletion = false
++            retries.clear()
++            scope.coroutineContext.cancelChildren()
+ 
+-        tracker.clear()
+-        this.mangaUpdates.clear()
+-        this.categoryUpdates.clear()
+-        this.updateStatusCategories = emptyMap()
+-        this.updateStatusSkippedMangas = emptyList()
++            tracker.clear()
++            this.mangaUpdates.clear()
++            this.categoryUpdates.clear()
++            this.updateStatusCategories = emptyMap()
++            this.updateStatusSkippedMangas = emptyList()
+ 
+-        scope.launch {
+-            updateStatus(immediate = true, isRunning = false)
+-        }
++            scope.launch {
++                updateStatus(immediate = true, isRunning = false)
++            }
+ 
+-        updateChannels.forEach { (_, channel) -> channel.cancel() }
+-        updateChannels.clear()
++            updateChannels.forEach { (_, channel) -> channel.cancel() }
++            updateChannels.clear()
++        }
+     }
+ }
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetries.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetries.kt
+new file mode 100644
+index 0000000..c443815
+--- /dev/null
++++ b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetries.kt
+@@ -0,0 +1,61 @@
++package suwayomi.tachidesk.manga.impl.update
++
++import kotlinx.serialization.Serializable
++
++@Serializable
++data class LibraryUpdateRetryState(
++    val completedAt: Long,
++    val mangaIds: Set<Int>,
++    val attempts: Int = 0,
++) {
++    init {
++        require(completedAt >= 0 && attempts in 0..2 && mangaIds.all { it > 0 })
++    }
++}
++
++/** Called under the updater lifecycle lock; persistence completes before dispatch. */
++class LibraryUpdateRetries(
++    initial: LibraryUpdateRetryState? = null,
++    private val save: (LibraryUpdateRetryState?) -> Unit = {},
++) {
++    var snapshot: LibraryUpdateRetryState? = initial
++        private set
++
++    val failedIds: Set<Int> get() = snapshot?.mangaIds.orEmpty()
++
++    val nextDueAt: Long? get() = snapshot?.takeIf { it.attempts < 2 }?.let { it.completedAt + (it.attempts + 1) * 3_600_000L }
++
++    private fun replace(state: LibraryUpdateRetryState?) {
++        if (state == snapshot) return
++        save(state)
++        snapshot = state
++    }
++
++    fun clear() = replace(null)
++
++    fun finishMainUpdate(
++        completedAt: Long,
++        failedIds: Set<Int>,
++    ) = replace(failedIds.takeIf { it.isNotEmpty() }?.let { LibraryUpdateRetryState(completedAt, it.toSet()) })
++
++    fun chapterSynced(mangaId: Int) = retain(failedIds - mangaId)
++
++    fun retain(ids: Set<Int>) {
++        val state = snapshot ?: return
++        val remaining = state.mangaIds.intersect(ids)
++        replace(remaining.takeIf { it.isNotEmpty() }?.let { state.copy(mangaIds = it) })
++    }
++
++    fun claimDue(
++        now: Long,
++        busy: Boolean = false,
++    ): Set<Int> {
++        val state = snapshot ?: return emptySet()
++        if (busy || now < state.completedAt) return emptySet()
++        val dueAttempt = ((now - state.completedAt) / 3_600_000L).coerceAtMost(2).toInt()
++        if (dueAttempt <= state.attempts) return emptySet()
++        // Coalesce missed slots after sleep/restart; never burst two source requests.
++        replace(state.copy(attempts = dueAttempt))
++        return state.mangaIds
++    }
++}
+diff --git a/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetriesTest.kt b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetriesTest.kt
+new file mode 100644
+index 0000000..5059fa9
+--- /dev/null
++++ b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetriesTest.kt
+@@ -0,0 +1,82 @@
++package suwayomi.tachidesk.manga.impl.update
++
++import kotlinx.serialization.json.Json
++import org.junit.jupiter.api.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertNull
++
++class LibraryUpdateRetriesTest {
++    private val hour = 3_600_000L
++    private val completedAt = 1_000_000L
++
++    @Test
++    fun `both retries are anchored to main completion and stop after two`() {
++        val retries = LibraryUpdateRetries()
++        retries.finishMainUpdate(completedAt, setOf(1, 2))
++        assertEquals(completedAt + hour, retries.nextDueAt)
++        assertEquals(emptySet(), retries.claimDue(completedAt + hour - 1))
++        assertEquals(setOf(1, 2), retries.claimDue(completedAt + hour))
++        assertEquals(emptySet(), retries.claimDue(completedAt + hour + 1))
++        retries.chapterSynced(1)
++        assertEquals(setOf(2), retries.claimDue(completedAt + 2 * hour))
++        assertEquals(emptySet(), retries.claimDue(completedAt + 20 * hour))
++        assertEquals(setOf(2), retries.failedIds)
++        assertNull(retries.nextDueAt)
++    }
++
++    @Test
++    fun `serialized plan resumes without repeating an attempted slot`() {
++        var saved: LibraryUpdateRetryState? = null
++        val retries = LibraryUpdateRetries(save = { saved = it })
++        retries.finishMainUpdate(completedAt, setOf(3))
++        retries.claimDue(completedAt + hour)
++        val restored = LibraryUpdateRetries(Json.decodeFromString<LibraryUpdateRetryState>(Json.encodeToString(saved!!)))
++        assertEquals(emptySet(), restored.claimDue(completedAt + hour + 100))
++        assertEquals(setOf(3), restored.claimDue(completedAt + 2 * hour))
++    }
++
++    @Test
++    fun `missed slots coalesce and busy server does not consume an attempt`() {
++        val retries = LibraryUpdateRetries()
++        retries.finishMainUpdate(completedAt, setOf(4))
++        assertEquals(emptySet(), retries.claimDue(completedAt + hour, busy = true))
++        assertEquals(setOf(4), retries.claimDue(completedAt + 3 * hour))
++        assertEquals(emptySet(), retries.claimDue(completedAt + 3 * hour + 1))
++    }
++
++    @Test
++    fun `manual success cancels retries only for the synchronized title`() {
++        val retries = LibraryUpdateRetries()
++        retries.finishMainUpdate(completedAt, setOf(1, 2))
++        retries.chapterSynced(100)
++        retries.chapterSynced(1)
++        assertEquals(setOf(2), retries.claimDue(completedAt + hour))
++        retries.chapterSynced(2)
++        assertNull(retries.snapshot)
++        assertEquals(emptySet(), retries.claimDue(completedAt + 2 * hour))
++    }
++
++    @Test
++    fun `reset and new main completion supersede old plans`() {
++        val retries = LibraryUpdateRetries()
++        retries.finishMainUpdate(completedAt, setOf(1))
++        retries.clear()
++        assertEquals(emptySet(), retries.claimDue(completedAt + hour))
++        retries.finishMainUpdate(completedAt + hour, setOf(2))
++        assertEquals(emptySet(), retries.claimDue(completedAt + hour))
++        assertEquals(setOf(2), retries.claimDue(completedAt + 2 * hour))
++        retries.finishMainUpdate(completedAt + 2 * hour, emptySet())
++        assertNull(retries.snapshot)
++    }
++
++    @Test
++    fun `removed titles are excluded and state persists before dispatch`() {
++        var saved: LibraryUpdateRetryState? = null
++        val retries = LibraryUpdateRetries(save = { saved = it })
++        retries.finishMainUpdate(completedAt, setOf(1, 2))
++        retries.retain(setOf(2))
++        assertEquals(setOf(2), retries.claimDue(completedAt + hour))
++        assertEquals(1, saved?.attempts)
++        assertEquals(setOf(2), saved?.mangaIds)
++    }
++}
+diff --git a/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateReconciliationTest.kt b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateReconciliationTest.kt
+new file mode 100644
+index 0000000..c9a1f6a
+--- /dev/null
++++ b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateReconciliationTest.kt
+@@ -0,0 +1,163 @@
++package suwayomi.tachidesk.manga.impl.update
++
++import android.app.Application
++import android.content.Context
++import eu.kanade.tachiyomi.source.Source
++import eu.kanade.tachiyomi.source.model.SChapter
++import eu.kanade.tachiyomi.source.model.SManga
++import eu.kanade.tachiyomi.source.model.SMangaUpdate
++import io.mockk.coEvery
++import io.mockk.every
++import io.mockk.mockk
++import io.mockk.mockkObject
++import io.mockk.unmockkObject
++import kotlinx.coroutines.CompletableDeferred
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.withTimeout
++import kotlinx.serialization.json.Json
++import org.jetbrains.exposed.v1.core.eq
++import org.jetbrains.exposed.v1.jdbc.selectAll
++import org.jetbrains.exposed.v1.jdbc.transactions.transaction
++import org.jetbrains.exposed.v1.jdbc.update
++import org.junit.jupiter.api.AfterEach
++import org.junit.jupiter.api.BeforeEach
++import org.junit.jupiter.api.Test
++import suwayomi.tachidesk.manga.impl.Category
++import suwayomi.tachidesk.manga.impl.CategoryManga
++import suwayomi.tachidesk.manga.impl.Manga
++import suwayomi.tachidesk.manga.impl.util.source.GetSource
++import suwayomi.tachidesk.manga.model.table.ChapterTable
++import suwayomi.tachidesk.manga.model.table.MangaTable
++import suwayomi.tachidesk.manga.model.table.toDataClass
++import suwayomi.tachidesk.test.ApplicationTest
++import suwayomi.tachidesk.test.clearTables
++import suwayomi.tachidesk.test.createLibraryManga
++import uy.kohesive.injekt.Injekt
++import uy.kohesive.injekt.api.get
++import kotlin.test.assertEquals
++import kotlin.test.assertFailsWith
++import kotlin.test.assertNotEquals
++import kotlin.test.assertNull
++
++class LibraryUpdateReconciliationTest : ApplicationTest() {
++    private lateinit var updater: IUpdater
++    private var categoryId: Int? = null
++    private val source = mockk<Source>(relaxed = true)
++
++    @BeforeEach
++    fun prepare() {
++        updater = Injekt.get()
++        updater.reset()
++        mockkObject(GetSource)
++        coEvery { GetSource.getSourceOrNull(any()) } returns source
++        every { source.id } returns 1L
++        coEvery { source.getMangaUpdate(any(), any(), any(), any()) } throws IllegalStateException("source offline")
++    }
++
++    private suspend fun waitUntil(predicate: () -> Boolean) =
++        withTimeout(10_000) {
++            while (!predicate()) delay(10)
++        }
++
++    private fun status(id: Int) =
++        updater
++            .getStatus()
++            .mangaUpdates
++            .firstOrNull { it.manga.id == id }
++            ?.status
++
++    private fun fetched() =
++        SMangaUpdate(
++            SManga.create().apply {
++                title = "Repaired"
++                url = "repaired"
++            },
++            listOf(
++                SChapter.create().apply {
++                    name = "Chapter 1"
++                    url = "chapter-1"
++                    chapter_number = 1f
++                },
++            ),
++        )
++
++    @Test
++    fun `only a successful chapter database sync reconciles a failure`() =
++        runBlocking {
++            val id = createLibraryManga("Reconcile")
++            updater.addMangasToQueue(
++                transaction { MangaTable.selectAll().where { MangaTable.id eq id }.map { MangaTable.toDataClass(it) } },
++            )
++            waitUntil { status(id) == JobStatus.FAILED }
++            assertFailsWith<IllegalStateException> { Manga.updateMangaAndChapters(id, updateManga = false) }
++            assertEquals(JobStatus.FAILED, status(id))
++
++            coEvery { source.getMangaUpdate(any(), any(), any(), any()) } returns fetched()
++            Manga.updateMangaAndChapters(id, updateChapters = false)
++            assertEquals(JobStatus.FAILED, status(id))
++            Manga.updateMangaAndChapters(id, updateManga = false)
++            assertEquals(JobStatus.COMPLETE, status(id))
++            assertEquals(1, transaction { ChapterTable.selectAll().where { ChapterTable.manga eq id }.count() }.toInt())
++        }
++
++    @Test
++    fun `main completion persists failures and manual sync removes only its title`() =
++        runBlocking {
++            val first = createLibraryManga("Main first")
++            val second = createLibraryManga("Main second")
++            val category = Category.createCategory("Retry fixture").also { categoryId = it }
++            CategoryManga.addMangasToCategories(listOf(first, second), listOf(category))
++            val preferences = Injekt.get<Application>().getSharedPreferences("server_util", Context.MODE_PRIVATE)
++            val before = System.currentTimeMillis()
++            updater.addCategoriesToUpdateQueue(Category.getCategoryList(), clear = true, forceAll = true)
++            waitUntil {
++                status(first) == JobStatus.FAILED && status(second) == JobStatus.FAILED &&
++                    !updater.getStatus().isRunning && preferences.getString("libraryUpdateRetriesV1", null) != null
++            }
++            val saved = Json.decodeFromString<LibraryUpdateRetryState>(preferences.getString("libraryUpdateRetriesV1", null)!!)
++            assertEquals(setOf(first, second), saved.mangaIds)
++            assertEquals(0, saved.attempts)
++            assert(saved.completedAt in before..System.currentTimeMillis())
++
++            coEvery { source.getMangaUpdate(any(), any(), any(), any()) } returns fetched()
++            Manga.updateMangaAndChapters(first, updateManga = false)
++            val remaining = Json.decodeFromString<LibraryUpdateRetryState>(preferences.getString("libraryUpdateRetriesV1", null)!!)
++            assertEquals(setOf(second), remaining.mangaIds)
++            assertEquals(JobStatus.FAILED, status(second))
++            updater.reset()
++            assertNull(preferences.getString("libraryUpdateRetriesV1", null))
++        }
++
++    @Test
++    fun `a broken source channel leaves another source running`() =
++        runBlocking {
++            val broken = createLibraryManga("Broken channel")
++            val healthy = createLibraryManga("Healthy channel")
++            transaction { MangaTable.update({ MangaTable.id eq healthy }) { it[sourceReference] = 2 } }
++            val gate = CompletableDeferred<Unit>()
++            val otherSource = mockk<Source>(relaxed = true)
++            coEvery { GetSource.getSourceOrNull(2) } returns otherSource
++            coEvery { source.getMangaUpdate(any(), any(), any(), any()) } throws AssertionError("broken channel")
++            coEvery { otherSource.getMangaUpdate(any(), any(), any(), any()) } coAnswers {
++                gate.await()
++                fetched()
++            }
++            updater.addMangasToQueue(transaction { MangaTable.selectAll().map { MangaTable.toDataClass(it) } })
++            try {
++                waitUntil { status(broken) == JobStatus.FAILED }
++                assertNotEquals(JobStatus.FAILED, status(healthy))
++            } finally {
++                gate.complete(Unit)
++            }
++            waitUntil { status(healthy) == JobStatus.COMPLETE }
++        }
++
++    @AfterEach
++    fun cleanup() {
++        updater.reset()
++        unmockkObject(GetSource)
++        categoryId?.let { Category.removeCategory(it) }
++        clearTables(ChapterTable, MangaTable)
++    }
++}

@@ -244,9 +244,17 @@ AsyncValue<bool?> updateRunningSocket(Ref ref) => ref.watch(
 );
 
 @riverpod
-Future<List<MangaDto>> failedUpdates(Ref ref) =>
-    ref.watch(updatesRepositoryProvider).failedUpdates();
+Future<List<MangaDto>> failedUpdates(Ref ref) {
+  ref.listen(updateRunningSocketProvider, (_, next) {
+    if (next.value == false) ref.invalidateSelf();
+  });
+  return ref.watch(updatesRepositoryProvider).failedUpdates();
+}
 
 @riverpod
-Future<int> failedUpdateCount(Ref ref) async =>
-    await ref.watch(updatesRepositoryProvider).failedUpdateCount() ?? 0;
+Future<int> failedUpdateCount(Ref ref) async {
+  ref.listen(updateRunningSocketProvider, (_, next) {
+    if (next.value == false) ref.invalidateSelf();
+  });
+  return await ref.watch(updatesRepositoryProvider).failedUpdateCount() ?? 0;
+}

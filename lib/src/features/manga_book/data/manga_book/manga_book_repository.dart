@@ -20,14 +20,19 @@ import '../../domain/chapter_batch/chapter_batch_model.dart';
 import '../../domain/chapter_page/chapter_page_model.dart';
 import '../../domain/manga/manga_model.dart';
 import '../downloads/downloads_repository.dart';
+import '../updates/updates_repository.dart';
 import './__generated__/query.graphql.dart';
 
 part 'manga_book_repository.g.dart';
 
 class MangaBookRepository {
-  const MangaBookRepository(this.client, {this.readOfflineDb});
+  const MangaBookRepository(this.client, {
+    this.readOfflineDb,
+    this.onChaptersSynced,
+  });
   final GraphQLClient client;
   final OfflineDatabase? Function()? readOfflineDb;
+  final void Function()? onChaptersSynced;
 
   Future<MangaDto?> addMangaToLibrary(int mangaId) => client
       .mutate$UpdateManga(
@@ -326,7 +331,11 @@ class MangaBookRepository {
           ),
         ),
       )
-      .getData((data) => data.fetchChapters?.chapters);
+      .getData((data) => data.fetchChapters?.chapters)
+      .then((chapters) {
+        if (chapters != null) onChaptersSynced?.call();
+        return chapters;
+      });
 
   /// Fetches metadata and chapters; Tachiyomix 1.6+ chapters-only fetches do not populate metadata.
   Future<List<ChapterDto>?> getMangaAndChapterList(int mangaId) async => client
@@ -341,7 +350,11 @@ class MangaBookRepository {
           ),
         ),
       )
-      .getData((data) => data.fetchMangaAndChapters?.chapters);
+      .getData((data) => data.fetchMangaAndChapters?.chapters)
+      .then((chapters) {
+        if (chapters != null) onChaptersSynced?.call();
+        return chapters;
+      });
 
   /// Reads stored server chapters without contacting the source.
   Future<List<ChapterDto>?> getStoredChapterList(int mangaId) async => client
@@ -366,4 +379,9 @@ class MangaBookRepository {
 MangaBookRepository mangaBookRepository(Ref ref) => MangaBookRepository(
   ref.watch(graphQlClientProvider),
   readOfflineDb: () => ref.read(offlineReadDatabaseProvider),
+  onChaptersSynced: () {
+    if (!ref.mounted) return;
+    ref.invalidate(failedUpdatesProvider);
+    ref.invalidate(failedUpdateCountProvider);
+  },
 );
