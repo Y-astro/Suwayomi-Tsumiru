@@ -11,6 +11,7 @@ import '../../constants/navigation_bar_data.dart';
 import '../../features/browse_center/presentation/extension/controller/extension_update_badge.dart';
 import '../../features/offline/data/offline_nav_status.dart';
 import 'nav_badges.dart';
+import 'nav_counts.dart';
 import 'nav_motion_icon.dart';
 
 class SmallScreenNavigationBar extends ConsumerWidget {
@@ -24,7 +25,7 @@ class SmallScreenNavigationBar extends ConsumerWidget {
   final void Function(int) onDestinationSelected;
 
   NavigationDestination getNavigationDestination(
-    BuildContext context,
+    String label,
     NavigationBarData data,
     bool selected,
     bool downloadsPaused,
@@ -33,8 +34,8 @@ class SmallScreenNavigationBar extends ConsumerWidget {
     final icon = NavMotionIcon(data, selected: selected);
     return NavigationDestination(
       icon: badgedNavIcon(icon, data, downloadsPaused, extensionUpdates),
-      label: data.label(context),
-      tooltip: data.label(context),
+      label: label,
+      tooltip: label,
     );
   }
 
@@ -44,13 +45,14 @@ class SmallScreenNavigationBar extends ConsumerWidget {
     final extensionUpdates =
         ref.watch(extensionUpdateBadgeCountProvider).value ?? 0;
     final navList = NavigationBarData.getNavList(context);
+    final counts = ref.watch(navCountsProvider);
     return NavigationBar(
       selectedIndex: selectedIndex,
       onDestinationSelected: onDestinationSelected,
       destinations: [
         for (var i = 0; i < navList.length; i++)
           getNavigationDestination(
-            context,
+            countedNavLabel(context, navList[i], counts),
             navList[i],
             i == selectedIndex,
             downloadsPaused,

@@ -11,8 +11,12 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tsumiru/src/features/browse_center/presentation/extension/controller/extension_update_badge.dart';
+import 'package:tsumiru/src/features/library/presentation/library/controller/library_manga_list.dart';
+import 'package:tsumiru/src/features/manga_book/domain/manga/graphql/__generated__/fragment.graphql.dart';
+import 'package:tsumiru/src/features/manga_book/domain/manga/manga_model.dart';
 import 'package:tsumiru/src/features/offline/data/offline_nav_status.dart';
 import 'package:tsumiru/src/global_providers/global_providers.dart';
+import 'package:tsumiru/src/graphql/__generated__/schema.graphql.dart';
 import 'package:tsumiru/src/l10n/generated/app_localizations.dart';
 import 'package:tsumiru/src/widgets/desktop/desktop_top_bar.dart';
 import 'package:tsumiru/src/widgets/shell/big_screen_navigation_bar.dart';
@@ -30,6 +34,7 @@ Future<void> _pump(
   int selectedIndex = 0,
   ValueChanged<int>? onDestinationSelected,
   bool downloadsPaused = false,
+  List<MangaDto>? Function()? library,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
@@ -52,6 +57,7 @@ Future<void> _pump(
         sharedPreferencesProvider.overrideWithValue(prefs),
         downloadsPausedBadgeProvider.overrideWith((ref) => downloadsPaused),
         extensionUpdateBadgeCountProvider.overrideWith((ref) async => 0),
+        libraryMangaListProvider.overrideWith((ref) async => library?.call()),
       ],
       child: MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -86,7 +92,52 @@ AppLocalizations _l10n(WidgetTester tester) =>
 double _sidebarWidth(WidgetTester tester) =>
     tester.getSize(find.byType(DesktopSidebar)).width;
 
+MangaDto _manga(int id, int unreadCount) => Fragment$MangaDto(
+  id: id,
+  title: 'Series $id',
+  chapters: Fragment$MangaDto$chapters(totalCount: 5),
+  genre: const [],
+  initialized: true,
+  meta: const [],
+  sourceId: '1',
+  status: Enum$MangaStatus.ONGOING,
+  categories: Fragment$MangaDto$categories(nodes: const []),
+  trackRecords: Fragment$MangaDto$trackRecords(nodes: const []),
+  updateStrategy: Enum$UpdateStrategy.ALWAYS_UPDATE,
+  url: '/manga/$id',
+  user: Fragment$MangaDto$user(
+    bookmarkCount: 0,
+    downloadCount: 0,
+    inLibrary: true,
+    inLibraryAt: '0',
+    unreadCount: unreadCount,
+  ),
+);
+
 void main() {
+  testWidgets('sidebar counts library titles and unread chapters independently', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(const {});
+    final prefs = await SharedPreferences.getInstance();
+    var library = [_manga(1, 5), _manga(2, 1), _manga(3, 0)];
+    await _pump(tester, prefs, library: () => library);
+    final l10n = _l10n(tester);
+    expect(find.text('${l10n.library} (3)'), findsOneWidget);
+    expect(find.text('${l10n.updates} (6)'), findsOneWidget);
+    expect(find.text(l10n.history), findsOneWidget);
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(DesktopSidebar)),
+    );
+    library = [_manga(1, 0), _manga(2, 0), _manga(3, 0)];
+    container.invalidate(libraryMangaListProvider);
+    await tester.pumpAndSettle();
+    expect(find.text('${l10n.library} (3)'), findsOneWidget);
+    expect(find.text('${l10n.updates} (0)'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('collapse, auto-collapse and accessible labels', (tester) async {
     SharedPreferences.setMockInitialValues(const {});
     final prefs = await SharedPreferences.getInstance();

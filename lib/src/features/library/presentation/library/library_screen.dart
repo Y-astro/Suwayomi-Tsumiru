@@ -208,19 +208,6 @@ class LibraryScreen extends HookConsumerWidget {
     final groupType =
         ref.watch(libraryGroupTypeProvider) ?? kDefaultLibraryGroupType;
 
-    // Seed from the current socket state; refresh on running→idle and ignore reconnect nulls.
-    final lastRunning = useRef<bool>(
-      ref.read(updateRunningSocketProvider).value ?? false,
-    );
-    ref.listen(updateRunningSocketProvider, (_, next) {
-      final running = next.value;
-      if (running == null) return;
-      if (lastRunning.value && !running) {
-        ref.invalidate(libraryMangaListProvider);
-      }
-      lastRunning.value = running;
-    });
-
     return groupType == LibraryGroup.byDefault
         ? _DefaultLibraryScreen(categoryId: categoryId)
         : _GroupedLibraryScreen(groupType: groupType);

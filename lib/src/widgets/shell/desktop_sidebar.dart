@@ -25,6 +25,7 @@ import '../compact_switch.dart';
 import '../desktop/desktop_brand.dart';
 import '../desktop/desktop_title_bar.dart';
 import 'nav_badges.dart';
+import 'nav_counts.dart';
 import 'nav_motion_icon.dart';
 import 'sidebar_expanded.dart';
 
@@ -77,6 +78,7 @@ class DesktopSidebar extends ConsumerWidget {
     final extensionUpdates =
         ref.watch(extensionUpdateBadgeCountProvider).value ?? 0;
     final showFoot = context.windowSizeClass >= WindowSizeClass.expanded;
+    final counts = ref.watch(navCountsProvider);
     final navList = showFoot
         ? NavigationBarData.desktopNavList
         : NavigationBarData.tabletNavList;
@@ -179,7 +181,7 @@ class DesktopSidebar extends ConsumerWidget {
     Widget row(int index, bool showExpanded) {
       final data = navList[index];
       final selected = index == destSelected;
-      final label = data.label(context);
+      final label = countedNavLabel(context, data, counts);
       final rowGap = showExpanded ? _rowGap : _collapsedRowGap;
       return shellRow(
         showExpanded: showExpanded,

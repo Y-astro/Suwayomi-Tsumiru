@@ -8,6 +8,7 @@ import 'package:tsumiru/src/features/auth/data/auth_credentials_store.dart';
 import 'package:tsumiru/src/features/library/data/category_repository.dart';
 import 'package:tsumiru/src/features/library/presentation/library/controller/library_manga_list.dart';
 import 'package:tsumiru/src/features/manga_book/data/manga_book/manga_book_repository.dart';
+import 'package:tsumiru/src/features/manga_book/data/updates/updates_repository.dart';
 import 'package:tsumiru/src/features/manga_book/domain/chapter/chapter_model.dart';
 import 'package:tsumiru/src/features/manga_book/domain/manga/graphql/__generated__/fragment.graphql.dart';
 import 'package:tsumiru/src/features/manga_book/domain/manga/manga_model.dart';
@@ -16,6 +17,7 @@ import 'package:tsumiru/src/features/offline/data/offline_repository.dart';
 import 'package:tsumiru/src/features/offline/data/offline_sync.dart';
 import 'package:tsumiru/src/global_providers/global_providers.dart';
 import 'package:tsumiru/src/graphql/__generated__/schema.graphql.dart';
+import 'package:tsumiru/src/widgets/shell/nav_counts.dart';
 
 import '../manga_book/manga_details/chapter_test_helpers.dart';
 
@@ -34,10 +36,12 @@ class _Library extends CategoryRepository {
   _Library() : super(_client());
   final entered = Completer<void>();
   final response = Completer<List<MangaDto>?>();
+  Future<List<MangaDto>?>? nextResponse;
+  int requests = 0;
   @override
   Future<List<MangaDto>?> getAllLibraryMangas({bool withFirstUnread = true}) {
-    entered.complete();
-    return response.future;
+    if (requests++ == 0) entered.complete();
+    return nextResponse ?? response.future;
   }
 }
 
@@ -103,7 +107,7 @@ class _Covers extends OfflineCoverWarmer {
   }
 }
 
-MangaDto _manga() => MangaDto(
+MangaDto _manga({int unreadCount = 1}) => MangaDto(
   id: 1,
   title: 'First account',
   chapters: Fragment$MangaDto$chapters(totalCount: 1),
@@ -121,7 +125,7 @@ MangaDto _manga() => MangaDto(
     downloadCount: 0,
     inLibrary: true,
     inLibraryAt: '0',
-    unreadCount: 1,
+    unreadCount: unreadCount,
   ),
 );
 
@@ -147,6 +151,9 @@ void main() {
         sharedPreferencesProvider.overrideWithValue(prefs),
         authCredentialsStoreProvider.overrideWith(() => auth),
         categoryRepositoryProvider.overrideWithValue(library),
+        updateRunningSocketProvider.overrideWithValue(
+          const AsyncData<bool?>(false),
+        ),
         mangaBookRepositoryProvider.overrideWithValue(details),
         offlineReadDatabaseProvider.overrideWithValue(null),
         offlineActiveProvider.overrideWithValue(false),
@@ -170,6 +177,31 @@ void main() {
       expect(sync.mangaWrites, 0);
       expect(sync.prunes, 0);
       expect(covers.calls, 0);
+    },
+  );
+
+  test(
+    'confirmed read changes refresh the count once for a burst of writes',
+    () async {
+      final counted = Completer<NavCounts>();
+      container.listen(navCountsProvider, (_, next) {
+        if (next != null && next.updates == 1) counted.complete(next);
+      });
+      await library.entered.future;
+      library.response.complete([_manga(unreadCount: 2)]);
+      await container.read(libraryMangaListProvider.future);
+      expect(container.read(navCountsProvider), (library: 1, updates: 2));
+
+      library.nextResponse = Future.value([_manga(unreadCount: 1)]);
+      final revision = container.read(updatesReadRevisionProvider.notifier);
+      revision.bump();
+      revision.bump();
+
+      expect(await counted.future.timeout(const Duration(seconds: 3)), (
+        library: 1,
+        updates: 1,
+      ));
+      expect(library.requests, 2);
     },
   );
 }

@@ -213,7 +213,7 @@ void main() {
 
     await pump(const LibraryScreen(categoryId: 1));
     expect(tester.takeException(), isNull);
-    final tabLabel = find.text('One', findRichText: true);
+    final tabLabel = find.text('One (6)', findRichText: true);
     expect(
       tester.getRect(tabLabel).left -
           tester.getRect(find.byType(BigScreenNavigationBar)).right,

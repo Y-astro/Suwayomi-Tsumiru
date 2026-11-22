@@ -9,5 +9,6 @@ void main() {
     // default direction is descending to open newest-read first.
     expect(DBKeys.mangaSortDirection.initial, false);
     expect(DBKeys.downloadedBadge.initial, false);
+    expect(DBKeys.categoryNumberOfItems.initial, true);
   });
 }

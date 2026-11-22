@@ -26,15 +26,16 @@ unless explicitly requested. Push completed, verified changes to the user's fork
    stays on v2.4.2366. Controlled migration removes duplicate legacy logs and
    preserves unrelated services and disabled flags. See [logging](logging.md)
    and [server packaging](../tool/server/bounded_logging/README.md).
-4. **Counts beside category and navigation labels — queued.** Show title counts
-   beside library category names, such as `Reading (12)`, and show counts beside
-   `Library` and `Updates` in navigation. Skip History. Resolve the meaning of
-   the Updates count when this item starts.
+4. **Counts beside category and navigation labels — completed.** Category labels
+   show the number of displayed titles by default and keep the existing display
+   toggle. Library counts distinct library titles. Updates counts all unread chapters
+   in the feed and refreshes after confirmed read changes
+   and library updates. History has no count.
 5. **Disable upstream Tsumiru update checks and notifications — queued.** This
    fork is personal; future upstream features will be imported deliberately.
 
 The initial native high-refresh optimization and launcher replacement are done.
 Item 2 has passed client, backend, and packaged-runtime tests. The existing custom
 v2.4.2366 server is patched without an upstream upgrade, and the application
-launcher uses the verified build. Item 3 is complete; items 4–5 remain queued. Push completed, verified changes
-to the fork without creating a PR.
+launcher uses the verified build. Items 3 and 4 are complete. Item 5 remains queued.
+Push completed, verified changes to the fork without creating a PR.

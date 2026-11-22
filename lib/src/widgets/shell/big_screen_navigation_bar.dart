@@ -15,6 +15,7 @@ import '../../utils/extensions/custom_extensions.dart';
 import '../tsumiru_logo.dart';
 import 'desktop_sidebar.dart';
 import 'nav_badges.dart';
+import 'nav_counts.dart';
 import 'nav_motion_icon.dart';
 
 class BigScreenNavigationBar extends ConsumerWidget {
@@ -28,7 +29,7 @@ class BigScreenNavigationBar extends ConsumerWidget {
   final ValueChanged<int> onDestinationSelected;
 
   NavigationRailDestination getNavigationRailDestination(
-    BuildContext context,
+    String label,
     NavigationBarData data,
     bool selected,
     bool downloadsPaused,
@@ -37,7 +38,7 @@ class BigScreenNavigationBar extends ConsumerWidget {
     final icon = NavMotionIcon(data, selected: selected);
     return NavigationRailDestination(
       icon: badgedNavIcon(icon, data, downloadsPaused, extensionUpdates),
-      label: Text(data.label(context)),
+      label: Text(label),
     );
   }
 
@@ -54,6 +55,7 @@ class BigScreenNavigationBar extends ConsumerWidget {
     final extensionUpdates =
         ref.watch(extensionUpdateBadgeCountProvider).value ?? 0;
     final navList = NavigationBarData.getNavList(context);
+    final counts = ref.watch(navCountsProvider);
     // Landscape phones omit the header to leave room for destinations.
     final isPhone = !context.usesDesktopShell;
 
@@ -79,7 +81,7 @@ class BigScreenNavigationBar extends ConsumerWidget {
               destinations: [
                 for (var i = 0; i < navList.length; i++)
                   getNavigationRailDestination(
-                    context,
+                    countedNavLabel(context, navList[i], counts),
                     navList[i],
                     i == selectedIndex,
                     downloadsPaused,

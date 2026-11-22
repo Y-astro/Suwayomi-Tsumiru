@@ -175,8 +175,8 @@ void main() {
       expect(find.byType(AppBar), findsNothing);
       expect(find.text('Library'), findsNothing);
       // Both categories fit: the strip shows them, no More control.
-      expect(find.text('One', findRichText: true), findsOneWidget);
-      expect(find.text('Two', findRichText: true), findsOneWidget);
+      expect(find.text('One (0)', findRichText: true), findsOneWidget);
+      expect(find.text('Two (0)', findRichText: true), findsOneWidget);
       expect(find.textContaining('More (', findRichText: true), findsNothing);
 
       // Crossing the breakpoint re-renders the same screen as the phone

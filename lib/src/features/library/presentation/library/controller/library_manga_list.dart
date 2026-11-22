@@ -17,6 +17,7 @@ import '../../../../../utils/crash/redact_tokens.dart';
 import '../../../../../utils/extensions/custom_extensions.dart';
 import '../../../../../widgets/manga_cover/providers/manga_cover_providers.dart';
 import '../../../../auth/data/auth_credentials_store.dart';
+import '../../../../manga_book/data/updates/updates_repository.dart';
 import '../../../../manga_book/domain/manga/manga_model.dart';
 import '../../../data/category_repository.dart';
 
@@ -27,6 +28,23 @@ Future<List<MangaDto>?> libraryMangaList(Ref ref) async {
   final sessionCurrent = watchAuthSession(ref);
   bool current() => ref.mounted && sessionCurrent();
   if (!current()) return null;
+
+  // Follow library updates even when Library has never been opened.
+  var wasRunning = ref.read(updateRunningSocketProvider).value ?? false;
+  ref.listen(updateRunningSocketProvider, (_, next) {
+    final running = next.value;
+    if (running == null) return;
+    if (wasRunning && !running) ref.invalidateSelf();
+    wasRunning = running;
+  });
+  // Reader saves can finish after navigation. Batch confirmed changes before refetching.
+  Timer? readRefresh;
+  ref.onDispose(() => readRefresh?.cancel());
+  ref.listen(updatesReadRevisionProvider, (_, _) {
+    readRefresh?.cancel();
+    readRefresh = Timer(const Duration(milliseconds: 350), ref.invalidateSelf);
+  });
+
   final offlineDb = ref.watch(offlineReadDatabaseProvider);
   final categoryRepository = ref.watch(categoryRepositoryProvider);
   // Only the optional continue-reading button needs the costly first-unread query.

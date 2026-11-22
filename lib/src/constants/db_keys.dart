@@ -168,7 +168,7 @@ enum DBKeys {
   sectionHeadersShowAllCategories(false),
   showHiddenCategories(false),
   showEmptyCategoriesSearch(false),
-  categoryNumberOfItems(false),
+  categoryNumberOfItems(true),
   libraryPersistentSearchBar(false),
   // 0=category, 1=source, 2=status, 3=track status, 4=ungrouped.
   libraryGroupType(0),
