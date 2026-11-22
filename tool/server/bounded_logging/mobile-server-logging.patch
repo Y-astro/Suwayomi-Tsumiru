@@ -1,0 +1,1245 @@
+diff --git a/app/suwayomi_logs.py b/app/suwayomi_logs.py
+new file mode 100644
+index 0000000..b5f1511
+--- /dev/null
++++ b/app/suwayomi_logs.py
+@@ -0,0 +1,365 @@
++"""Bounded log store and capture companion for Suwayomi-related services.
++
++Guarantees a strict aggregate 20,000,000-byte cap across active and rotated files
++using a shared ring store (active + 9 archives @ 2,000,000 bytes).
++All writes sanitize credentials before persistence.
++"""
++
++from datetime import datetime, timezone
++import errno
++import fcntl
++import gzip
++import hashlib
++import io
++import os
++from pathlib import Path
++import re
++import sys
++import time
++from typing import BinaryIO, Dict, Iterable, List, Optional, Sequence, TextIO, Tuple
++
++TOTAL_BUDGET_BYTES = 20_000_000
++SEGMENT_SIZE_BYTES = 2_000_000
++MAX_ARCHIVES = 9
++DEFAULT_LOG_DIR = Path("/storage/emulated/0/Suwayomi/logs")
++LOG_FILENAME = "suwayomi.log"
++LOCK_FILENAME = "suwayomi.lock"
++MARKER_FILENAME = ".imported_legacy"
++MAX_LOCK_WAIT_SECONDS = 5.0
++MAX_RECORD_LINE_BYTES = 64 * 1024
++
++# Redact incomplete quoted values too: capture may truncate an oversized record.
++_SECRET_KEYS = r'password|passwd|pass|secret|client_secret|token|access_?token|refresh_?token|api_?key|auth'
++RE_URL_USERINFO = re.compile(r'\b([a-zA-Z][a-zA-Z0-9+\-.]{0,31}://)[^/@\s]+@')
++RE_HEADERS = re.compile(r'((?:proxy-authorization|authorization|set-cookie|cookie)\s*[:=]\s*)[^\r\n]*', re.I)
++RE_ASSIGNMENT = re.compile(
++    r"""(["']?\b(?:""" + _SECRET_KEYS + r""")["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"?|'(?:\\.|[^'\\\r\n])*'?|[^\s,;&}\]\r\n]+)""", re.I)
++RE_AUTH = re.compile(r'\b(Bearer|Basic)\s+[^\s,;\r\n]+', re.I)
++
++
++def redact_sensitive_text(text: str) -> str:
++    """Remove credentials before writing any retained server log."""
++    result = RE_URL_USERINFO.sub(r'\1[REDACTED]@', text)
++    for pattern in (RE_HEADERS, RE_ASSIGNMENT, RE_AUTH):
++        result = pattern.sub(lambda match: match[1] + '[REDACTED]', result)
++    return result
++
++
++def legacy_candidates(home: Path) -> List[Path]:
++    """Exact owned legacy names; never sweep unrelated service or user files."""
++    result = []
++    application = re.compile(r'application(?:\.log|_\d{4}-\d{2}-\d{2}_\d+\.log\.gz)')
++    helper = re.compile(r'(?:graphql_filter|daily_update)\.log(?:\.[12])?')
++    for directory in (home / 'suwayomi/logs', home / 'suwayomi/data/logs'):
++        if directory.is_symlink() or not directory.is_dir():
++            continue
++        for path in directory.iterdir():
++            if (application.fullmatch(path.name) or helper.fullmatch(path.name)) and path.is_file() and not path.is_symlink():
++                result.append(path)
++    directory = home / '.config/server_recovery'
++    for service in ('suwayomi', 'suwayomi_filter', 'suwayomi_scheduler'):
++        for suffix in ('', '.1'):
++            path = directory / (service + '.log' + suffix)
++            if path.is_file() and not path.is_symlink():
++                result.append(path)
++    return sorted(result, key=lambda path: (path.stat().st_mtime_ns, str(path)))
++
++
++def truncate_utf8_to_bytes(s: str, max_bytes: int) -> str:
++    """Truncate string so its UTF-8 encoding is at most max_bytes, strictly valid."""
++    encoded = s.encode("utf-8")
++    if len(encoded) <= max_bytes:
++        return s
++    sliced = encoded[:max_bytes]
++    # Decode with ignore drops trailing incomplete code unit cleanly
++    return sliced.decode("utf-8", errors="ignore")
++
++
++class BoundedLogStore:
++    def __init__(
++        self,
++        log_dir: os.PathLike | str = DEFAULT_LOG_DIR,
++        segment_size: int = SEGMENT_SIZE_BYTES,
++        total_budget: int = TOTAL_BUDGET_BYTES,
++        max_archives: int = MAX_ARCHIVES,
++    ):
++        if segment_size < 64:
++            raise ValueError(f"segment_size must be positive, got {segment_size}")
++        if total_budget < segment_size:
++            raise ValueError(f"total_budget ({total_budget}) cannot be smaller than segment_size ({segment_size})")
++        if max_archives < 0:
++            raise ValueError(f"max_archives must be >= 0, got {max_archives}")
++
++        self.log_dir = Path(log_dir)
++        self.segment_size = segment_size
++        self.total_budget = total_budget
++        self.max_archives = min(max_archives, total_budget // segment_size - 1)
++        self._prepared = False
++        self.active_file = self.log_dir / LOG_FILENAME
++        canonical = self.log_dir.resolve()
++        if canonical.is_relative_to(Path('/storage/emulated')):
++            # Android shared storage rejects flock (ENOSYS); coordinate privately.
++            key = hashlib.sha256(str(canonical).encode()).hexdigest()
++            self.lock_file = Path.home() / '.cache/suwayomi-log-locks' / (key + '.lock')
++        else:
++            self.lock_file = self.log_dir / LOCK_FILENAME
++        self.marker_file = self.log_dir / MARKER_FILENAME
++        self._ensure_dir()
++        self._validate_not_symlink(self.active_file)
++        self._validate_not_symlink(self.lock_file)
++
++    def _ensure_dir(self) -> None:
++        try:
++            self.log_dir.mkdir(parents=True, exist_ok=True)
++            self.lock_file.parent.mkdir(parents=True, exist_ok=True)
++        except OSError:
++            pass
++
++    def _validate_not_symlink(self, path: Path) -> None:
++        if path.is_symlink():
++            raise ValueError(f"Security violation: path is a symlink: {path}")
++
++    def _lock(self, lock_fd: int, timeout: float = MAX_LOCK_WAIT_SECONDS) -> bool:
++        start = time.monotonic()
++        while True:
++            try:
++                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++                return True
++            except (BlockingIOError, OSError) as e:
++                if isinstance(e, BlockingIOError) or getattr(e, 'errno', None) in (errno.EAGAIN, errno.EWOULDBLOCK):
++                    if time.monotonic() - start >= timeout:
++                        return False
++                    time.sleep(0.02)
++                else:
++                    return False
++
++    def _unlock(self, lock_fd: int) -> None:
++        try:
++            fcntl.flock(lock_fd, fcntl.LOCK_UN)
++        except OSError:
++            pass
++
++    def total_disk_bytes(self) -> int:
++        """Calculate total bytes of active and archive log files."""
++        total = 0
++        if not self.log_dir.exists():
++            return 0
++        for entry in self.log_dir.glob("suwayomi.log*"):
++            if entry.is_file() and not entry.is_symlink():
++                try:
++                    total += entry.stat().st_size
++                except OSError:
++                    pass
++        return total
++
++    def _rotate_if_needed(self, incoming_bytes_len: int) -> bool:
++        """Fail closed when a required prune or rename cannot be completed."""
++        owned = [self.active_file] + [self.log_dir / f'{LOG_FILENAME}.{i}' for i in range(1, self.max_archives + 1)]
++        for path in owned:
++            self._validate_not_symlink(path)
++            if path.exists() and not path.is_file():
++                raise OSError('Log path is not a regular file')
++        if not self._prepared:
++            for path in owned:
++                if path.exists() and path.stat().st_size > self.segment_size:
++                    with path.open('rb') as handle:
++                        handle.seek(-self.segment_size, os.SEEK_END)
++                        tail = handle.read(self.segment_size)
++                    # The partial first record may lack its original credential key.
++                    end = tail.find(b'\n')
++                    path.write_bytes(tail[end + 1:] if end >= 0 else b'')
++            self._prepared = True
++        size = self.active_file.stat().st_size if self.active_file.exists() else 0
++        if size + incoming_bytes_len > self.segment_size:
++            owned[-1].unlink(missing_ok=True)
++            for i in range(len(owned) - 2, -1, -1):
++                if owned[i].exists():
++                    owned[i].replace(owned[i + 1])
++        # An unknown old log must not cause the writer to exceed the aggregate cap.
++        for path in reversed(owned[1:]):
++            if self.total_disk_bytes() + incoming_bytes_len <= self.total_budget:
++                break
++            path.unlink(missing_ok=True)
++        return self.total_disk_bytes() + incoming_bytes_len <= self.total_budget
++
++    def _append_unlocked(self, source: str, text: str) -> None:
++        if not text:
++            return
++        clipped = len(text) > MAX_RECORD_LINE_BYTES
++        redacted = redact_sensitive_text(text[:MAX_RECORD_LINE_BYTES])
++        now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
++        source = re.sub(r'[^a-zA-Z0-9_-]', '_', source)[:64]
++        prefix = f'{now} [{source}] '
++        marker = ' ... [TRUNCATED]'
++        limit = min(self.segment_size, MAX_RECORD_LINE_BYTES)
++        line = prefix + redacted.rstrip('\r\n')
++        if clipped or len(line.encode('utf-8')) + 1 > limit:
++            line = truncate_utf8_to_bytes(line, limit - len(marker) - 1) + marker
++        payload = (line + '\n').encode('utf-8')
++        if not self._rotate_if_needed(len(payload)):
++            raise OSError('Unable to maintain the aggregate log budget')
++        with self.active_file.open('ab', buffering=0) as handle:
++            handle.write(payload)
++
++    def append(self, source: str, text: str) -> bool:
++        """Thread-safe and process-safe append; failed storage never stops capture."""
++        self._ensure_dir()
++        try:
++            self._validate_not_symlink(self.lock_file)
++            with self.lock_file.open('a+b') as handle:
++                if not self._lock(handle.fileno(), timeout=0.05):
++                    return False
++                try:
++                    self._append_unlocked(source, text)
++                    return True
++                finally:
++                    self._unlock(handle.fileno())
++        except (OSError, ValueError):
++            return False
++
++    def read_active(self) -> str:
++        """Read current content of the active log file, ensuring valid UTF-8."""
++        if not self.active_file.exists() or self.active_file.is_symlink():
++            return ""
++        try:
++            return self.active_file.read_text(encoding="utf-8", errors="replace")
++        except OSError:
++            return ""
++
++    def import_legacy_logs_offline(self, candidates: Sequence[os.PathLike | str], *, home: Optional[Path] = None) -> int:
++        """Import only exact owned files while the controlled release has stopped producers.
++
++        Failed writes keep originals. Failed deletion keeps migration retryable.
++        """
++        home = Path.home() if home is None else Path(home)
++        allowed = {path.absolute() for path in legacy_candidates(home)}
++        requested = [Path(path).absolute() for path in candidates]
++        if any(path.exists() and path not in allowed for path in requested):
++            raise RuntimeError('Refusing an unowned legacy log path')
++        self._validate_not_symlink(self.lock_file)
++        self._validate_not_symlink(self.marker_file)
++        count = 0
++        with self.lock_file.open('a+b') as handle:
++            if not self._lock(handle.fileno()):
++                raise RuntimeError('Timed out acquiring the migration log lock')
++            try:
++                if self.marker_file.exists():
++                    if not any(path.exists() for path in requested):
++                        return 0
++                    self.marker_file.unlink()
++                imported = []
++                for path in requested:
++                    if not path.exists():
++                        continue
++                    opener = gzip.open if path.suffix == '.gz' else open
++                    batch = []
++                    size = 0
++                    with opener(path, 'rb') as source:
++                        for line, clipped in read_bounded_records(source):
++                            record = line + (' ... [TRUNCATED]' if clipped else '') + '\n'
++                            cost = len(record.encode('utf-8'))
++                            if batch and size + cost > 60000:
++                                self._append_unlocked('legacy', ''.join(batch))
++                                batch, size = [], 0
++                            batch.append(record)
++                            size += cost
++                            count += 1
++                    if batch:
++                        self._append_unlocked('legacy', ''.join(batch))
++                    imported.append(path)
++                for path in self.log_dir.glob('suwayomi.log*'):
++                    if path.is_file() and not path.is_symlink():
++                        with path.open('rb') as retained:
++                            os.fsync(retained.fileno())
++                for path in imported:
++                    path.unlink()
++                # Empty marker carries no log bytes outside the aggregate budget.
++                self.marker_file.touch()
++            finally:
++                self._unlock(handle.fileno())
++        return count
++
++
++def read_bounded_records(stream: BinaryIO, max_line_bytes: int = MAX_RECORD_LINE_BYTES) -> Iterable[Tuple[str, bool]]:
++    """Yield lines bounded at max_line_bytes without unbounded memory allocation on missing newlines."""
++    buf = bytearray()
++    discarding = False
++    while True:
++        try:
++            chunk = (stream.read1 if hasattr(stream, 'read1') else stream.read)(8192)
++        except (OSError, ValueError):
++            break
++        if not chunk:
++            if buf:
++                text = buf.decode("utf-8", errors="replace")
++                yield text, discarding
++            break
++
++        start = 0
++        while start < len(chunk):
++            nl_pos = chunk.find(b"\n", start)
++            if nl_pos != -1:
++                part = chunk[start:nl_pos]
++                start = nl_pos + 1
++                if discarding:
++                    discarding = False
++                    buf.clear()
++                else:
++                    needed = max_line_bytes - len(buf)
++                    if len(part) > needed:
++                        buf.extend(part[:needed])
++                        yield buf.decode("utf-8", errors="replace"), True
++                    else:
++                        buf.extend(part)
++                        yield buf.decode("utf-8", errors="replace"), False
++                    buf.clear()
++            else:
++                part = chunk[start:]
++                start = len(chunk)
++                if not discarding:
++                    needed = max_line_bytes - len(buf)
++                    if len(part) >= needed:
++                        buf.extend(part[:needed])
++                        yield buf.decode("utf-8", errors="replace"), True
++                        buf.clear()
++                        discarding = True
++                    else:
++                        buf.extend(part)
++
++
++def capture_stream(stream: BinaryIO | TextIO, store: BoundedLogStore, service_id: str) -> None:
++    """Read a process output stream chunk by chunk and append to BoundedLogStore until EOF."""
++    raw_stream = stream.buffer if hasattr(stream, "buffer") else stream
++    try:
++        for record, truncated in read_bounded_records(raw_stream):
++            if not record:
++                continue
++            if truncated:
++                record = record + " ... [TRUNCATED]"
++            store.append(service_id, record)
++    except (OSError, ValueError):
++        pass
++
++
++def main() -> None:
++    """CLI for detached capture and release-controlled offline migration."""
++    import argparse
++    parser = argparse.ArgumentParser(description=__doc__)
++    commands = parser.add_subparsers(dest='command', required=True)
++    capture = commands.add_parser('capture')
++    capture.add_argument('service')
++    capture.add_argument('log_dir', nargs='?', default=os.environ.get('SUWAYOMI_LOG_DIR', str(DEFAULT_LOG_DIR)))
++    migrate = commands.add_parser('migrate')
++    migrate.add_argument('--home', type=Path, default=Path.home())
++    migrate.add_argument('--log-dir', type=Path, default=DEFAULT_LOG_DIR)
++    args = parser.parse_args()
++    if args.command == 'capture':
++        capture_stream(sys.stdin.buffer, BoundedLogStore(args.log_dir), args.service)
++    else:
++        store = BoundedLogStore(args.log_dir)
++        count = store.import_legacy_logs_offline(legacy_candidates(args.home), home=args.home)
++        print(f'Migrated {count} entries.')
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/docs/suwayomi-bounded-logging.md b/docs/suwayomi-bounded-logging.md
+new file mode 100644
+index 0000000..ef75484
+--- /dev/null
++++ b/docs/suwayomi-bounded-logging.md
+@@ -0,0 +1,34 @@
++# Bounded Suwayomi activity logs
++
++Suwayomi, its GraphQL filter, and its daily scheduler share a 20,000,000-byte
++log budget at `/storage/emulated/0/Suwayomi/logs`. The ring contains
++`suwayomi.log` and up to nine 2,000,000-byte archives. Records include their
++service, timestamp, existing server events/errors, and filter operation/status/
++timing metadata. Request bodies, credentials, and response bodies are omitted.
++
++Detached capture drains bounded records from service stdout/stderr. Java remains
++the directly managed service PID. Normal file writes fail closed; an unavailable
++capture reader does not terminate Java. Android shared storage rejects `flock`,
++so its zero-byte coordination lock lives in private Termux cache instead.
++
++The `suwayomi-bounded-logging` release profile permits changes only to the JAR,
++supervisor, filter, scheduler, and log helper. It validates the complete manifest,
++preserves exact launcher/catalog compatibility pins, stops only the three
++Suwayomi services and supervisor, installs reviewed files, and imports the exact
++owned legacy logs while producers remain stopped. It then restarts only services
++that were enabled. Disabled markers and unrelated services retain their state.
++
++Offline import includes known application archives, filter/scheduler logs, and
++Suwayomi supervisor output. It redacts bounded batches, syncs retained logs, and
++removes originals only after successful persistence. Failed imports remain
++retryable. Old log data is never copied into Git or release manifests.
++
++Run focused checks with:
++
++```sh
++python3 -m unittest tests.test_suwayomi_logs tests.test_suwayomi_logging_acceptance tests.test_suwayomi_capture_lifecycle tests.test_release_activation tests.test_activation_native tests.test_supervisor tests.test_suwayomi_filter tests.test_suwayomi_lifecycle
++```
++
++Keep the custom v2.4.2366 JAR as the overlay base. Do not replace it with an
++upstream release. Package the minimal logging class patch separately, then use a
++complete reviewed release bundle and fresh live preconditions for activation.
+diff --git a/scripts/release_activation.py b/scripts/release_activation.py
+index 8075403..77d9972 100644
+--- a/scripts/release_activation.py
++++ b/scripts/release_activation.py
+@@ -196,6 +196,7 @@ PROFILE_GENERAL = "general"
+ PROFILE_SUWAYOMI_FILTER = "suwayomi-filter"
+ PROFILE_SUWAYOMI_LIFECYCLE = "suwayomi-lifecycle"
+ PROFILE_SUWAYOMI_JAR = "suwayomi-jar"
++PROFILE_SUWAYOMI_LOGGING = "suwayomi-bounded-logging"
+ PROFILE_ANTRA_SERVICE = "antra-service"
+ PROFILE_NAVIDROME_SERVICE = "navidrome-service"
+ VALID_PROFILES = (
+@@ -203,6 +204,7 @@ VALID_PROFILES = (
+     PROFILE_SUWAYOMI_FILTER,
+     PROFILE_SUWAYOMI_LIFECYCLE,
+     PROFILE_SUWAYOMI_JAR,
++    PROFILE_SUWAYOMI_LOGGING,
+     PROFILE_ANTRA_SERVICE,
+     PROFILE_NAVIDROME_SERVICE,
+ )
+@@ -220,6 +222,13 @@ NAVIDROME_SERVICE_CATALOG_SHA256 = "69b88b8b8e458a70fdc72cd222d40361a7df11ff1465
+ SIDEBAR_SERVICE_CATALOG_SHA256 = "0142fe3337d0beb52ad71cd3a07f87f7b6b2c1a2fc1efc50bf06120e6f7d2bf0"
+ SUWAYOMI_ACCEPTED_JAR_SHA256 = "9b7bf58329eccb3dcfb7246360f6818f7391b8804330a9e0491006049678bedc"
+ SUWAYOMI_JAR_MODE = 0o644
++SUWAYOMI_LOG_HELPER_REMOTE = "/data/data/com.termux/files/home/.local/lib/mobile-server/suwayomi_logs.py"
++SUWAYOMI_LOGGING_REMOTES = {
++    SUWAYOMI_JAR_REMOTE, SUPERVISOR_REMOTE, SUWAYOMI_FILTER_REMOTE,
++    SUWAYOMI_LOG_HELPER_REMOTE,
++    "/data/data/com.termux/files/home/bin/suwayomi_daily_update.py",
++}
++SUWAYOMI_LOGGING_SERVICES = {"suwayomi", "suwayomi_filter", "suwayomi_scheduler"}
+ 
+ SUWAYOMI_LIFECYCLE_ALLOWED_REMOTES = (
+     SUWAYOMI_LAUNCHER_REMOTE,
+@@ -525,6 +534,14 @@ def map_changed_destinations(
+                 affected_services.add("suwayomi_scheduler")
+                 supervisor_affected = True
+ 
++        elif profile == PROFILE_SUWAYOMI_LOGGING:
++            norm = remote.replace("\\", "/").rstrip("/")
++            allowed_actions = (rt.ACTION_CREATE, rt.ACTION_REPLACE) if norm == SUWAYOMI_LOG_HELPER_REMOTE else (rt.ACTION_REPLACE,)
++            if norm not in SUWAYOMI_LOGGING_REMOTES or action not in allowed_actions:
++                raise ActivationError(f"Unreviewed bounded logging change: {remote} ({action})")
++            affected_services.update(SUWAYOMI_LOGGING_SERVICES)
++            supervisor_affected = True
++
+         elif profile == PROFILE_SUWAYOMI_JAR:
+             norm = remote.replace("\\", "/").rstrip("/")
+             if norm != SUWAYOMI_JAR_REMOTE:
+@@ -891,7 +908,7 @@ def validate_activation_journal(
+         else:
+             validate_prior_backend_recipe(recipe, ns_root, tx_entries)
+ 
+-    elif validated_profile == PROFILE_SUWAYOMI_JAR:
++    elif validated_profile in (PROFILE_SUWAYOMI_JAR, PROFILE_SUWAYOMI_LOGGING):
+         tx_entries = tx_journal.get("entries", [])
+         assets = act_journal.get("recovery_assets", {})
+         cat_sha = assets.get("service_catalog.py")
+@@ -905,20 +922,15 @@ def validate_activation_journal(
+                     or entry.get("original_sha256") != digest or entry.get("candidate_sha256") != digest):
+                 raise ActivationError("JAR recovery lifecycle preimage binding mismatch")
+         changed_entries = [e for e in tx_entries if e.get("action") != rt.ACTION_UNTOUCHED]
+-        if len(changed_entries) != 1:
+-            raise ActivationError(
+-                f"Profile '{PROFILE_SUWAYOMI_JAR}' requires exactly 1 changed entry, found {len(changed_entries)}"
+-            )
+-        jar_entry = changed_entries[0]
+-        entry_remote = jar_entry.get("dest_path") or jar_entry.get("remote")
+-        if entry_remote != SUWAYOMI_JAR_REMOTE:
+-            raise ActivationError(
+-                f"Profile '{PROFILE_SUWAYOMI_JAR}' permits only {SUWAYOMI_JAR_REMOTE} to change, found: {entry_remote}"
+-            )
+-        if jar_entry.get("action") != rt.ACTION_REPLACE:
+-            raise ActivationError(
+-                f"Profile '{PROFILE_SUWAYOMI_JAR}' permits only action REPLACE, found: {jar_entry.get('action')}"
+-            )
++        if validated_profile == PROFILE_SUWAYOMI_JAR:
++            if len(changed_entries) != 1 or changed_entries[0].get("remote") != SUWAYOMI_JAR_REMOTE:
++                raise ActivationError("suwayomi-jar recovery requires exactly one changed JAR entry")
++        else:
++            map_changed_destinations(changed_entries, profile=PROFILE_SUWAYOMI_LOGGING)
++        jar_entry = next((entry for entry in tx_entries if entry.get("remote") == SUWAYOMI_JAR_REMOTE), {})
++        actions = (rt.ACTION_REPLACE, rt.ACTION_UNTOUCHED) if validated_profile == PROFILE_SUWAYOMI_LOGGING else (rt.ACTION_REPLACE,)
++        if jar_entry.get("action") not in actions:
++            raise ActivationError("Unexpected JAR recovery action")
+         if rt.normalize_mode(jar_entry.get("target_mode")) != SUWAYOMI_JAR_MODE:
+             raise ActivationError(
+                 f"Profile '{PROFILE_SUWAYOMI_JAR}' target mode mismatch: expected {oct(SUWAYOMI_JAR_MODE)}, got {jar_entry.get('target_mode')}"
+@@ -1571,7 +1583,7 @@ def plan(
+     profile = validate_profile(profile)
+     b_root = Path(bundle_root).resolve()
+     manifest_mod = rt._load_release_manifest_module()
+-    require_suwayomi_jar = (profile == PROFILE_SUWAYOMI_JAR)
++    require_suwayomi_jar = (profile in (PROFILE_SUWAYOMI_JAR, PROFILE_SUWAYOMI_LOGGING))
+     manifest_entries = manifest_mod.generate_manifest(
+         b_root,
+         require_gateway=True,
+@@ -1639,7 +1651,7 @@ def plan(
+                 profile=profile,
+             )
+ 
+-    if profile == PROFILE_SUWAYOMI_JAR:
++    if profile in (PROFILE_SUWAYOMI_JAR, PROFILE_SUWAYOMI_LOGGING):
+         jar_precond = precond_files.get(SUWAYOMI_JAR_REMOTE)
+         if not jar_precond:
+             raise ActivationError(f"Missing precondition for {SUWAYOMI_JAR_REMOTE}")
+@@ -1664,6 +1676,22 @@ def plan(
+     }
+ 
+ 
++def migrate_bounded_suwayomi_logs(ns_root: Path, manifest_entries: List[Dict[str, Any]]) -> None:
++    """Run the manifest-verified importer only inside guarded release quiescence."""
++    helper = ns_root / "home/.local/lib/mobile-server/suwayomi_logs.py"
++    expected = next((entry["sha256"] for entry in manifest_entries if entry["remote"] == SUWAYOMI_LOG_HELPER_REMOTE), None)
++    if helper.is_symlink() or not helper.is_file() or compute_file_sha256(helper) != expected:
++        raise ActivationError("Unverified bounded logging migration helper")
++    import subprocess
++    destination = Path("/storage/emulated/0/Suwayomi/logs") if ns_root.resolve() == Path("/data/data/com.termux/files").resolve() else ns_root / "shared/Suwayomi/logs"
++    result = subprocess.run(
++        [sys.executable, str(helper), "migrate", "--home", str(ns_root / "home"), "--log-dir", str(destination)],
++        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300,
++    )
++    if result.returncode:
++        raise ActivationError("Bounded server log migration failed; originals retained for retry")
++
++
+ def apply(
+     bundle_root: Path,
+     preconditions: Dict[str, Any],
+@@ -1689,11 +1717,11 @@ def apply(
+     with ActivationLock(ns_root):
+         if driver.is_paused():
+             raise ActivationError("Server is deliberately paused; activation refused")
+-        if profile == PROFILE_SUWAYOMI_JAR:
++        if profile in (PROFILE_SUWAYOMI_JAR, PROFILE_SUWAYOMI_LOGGING):
+             require_reviewed_jar_lifecycle(ns_root, current_uid, driver)
+ 
+         manifest_mod = rt._load_release_manifest_module()
+-        require_suwayomi_jar = (profile == PROFILE_SUWAYOMI_JAR)
++        require_suwayomi_jar = (profile in (PROFILE_SUWAYOMI_JAR, PROFILE_SUWAYOMI_LOGGING))
+         manifest_entries = manifest_mod.generate_manifest(
+             b_root,
+             require_gateway=True,
+@@ -1713,7 +1741,7 @@ def apply(
+             if "profile" in sig.parameters:
+                 driver.validate_candidate_services(b_root, profile=profile)
+             else:
+-                if profile in (PROFILE_SUWAYOMI_LIFECYCLE, PROFILE_SUWAYOMI_JAR):
++                if profile in (PROFILE_SUWAYOMI_LIFECYCLE, PROFILE_SUWAYOMI_JAR, PROFILE_SUWAYOMI_LOGGING):
+                     raise ActivationError(
+                         f"Lifecycle driver does not support profile-aware validation for {profile}"
+                     )
+@@ -1854,7 +1882,7 @@ def apply(
+ 
+         try:
+             with driver.lock("services", timeout=10.0):
+-                if profile == PROFILE_SUWAYOMI_JAR:
++                if profile in (PROFILE_SUWAYOMI_JAR, PROFILE_SUWAYOMI_LOGGING):
+                     require_reviewed_jar_lifecycle(ns_root, current_uid, driver)
+ 
+                 if profile == PROFILE_SUWAYOMI_LIFECYCLE:
+@@ -1977,6 +2005,11 @@ def apply(
+                     if driver.is_daemon_running() or driver.find_daemon_process() is not None:
+                         raise QuiescenceError("Supervisor daemon reappeared or replaced during unlocked gap")
+ 
++                if profile == PROFILE_SUWAYOMI_LOGGING:
++                    for sid in SUWAYOMI_LOGGING_SERVICES:
++                        if driver.matching_processes(sid):
++                            raise QuiescenceError(f"{sid} still running before bounded log migration")
++
+                 # Apply file transaction
+                 act_journal["state"] = STATE_APPLYING
+                 save_activation_journal(tx_dir, act_journal)
+@@ -1987,6 +2020,11 @@ def apply(
+                 # Reload lifecycle authority to bind candidate configuration
+                 driver.reload_lifecycle()
+ 
++                if profile == PROFILE_SUWAYOMI_LOGGING:
++                    migrate_bounded_suwayomi_logs(ns_root, manifest_entries)
++                    act_journal["bounded_log_migration"] = "completed"
++                    save_activation_journal(tx_dir, act_journal)
++
+                 # Dependency-ordered reactivation & health checks
+                 sorted_active = sort_services_by_dependencies(active_services)
+                 for sid in sorted_active:
+diff --git a/scripts/server_supervisor.py b/scripts/server_supervisor.py
+index 2b13336..619ad17 100755
+--- a/scripts/server_supervisor.py
++++ b/scripts/server_supervisor.py
+@@ -361,11 +361,10 @@ def get_tracer_pid():
+     return 0
+ 
+ 
++BOUNDED_SUWAYOMI_SERVICES = {'suwayomi', 'suwayomi_filter', 'suwayomi_scheduler'}
++
++
+ def launch(sid, cfg):
+-    log_path = STATE / f'{sid}.log'
+-    # Rotate before restart; do not truncate a running writer's file.
+-    if log_path.exists() and log_path.stat().st_size > 2*1024*1024:
+-        log_path.replace(log_path.with_suffix('.log.1'))
+     tpid = get_tracer_pid()
+     if tpid != 0:
+         LOG.warning('Refusing to launch %s directly from traced/PRoot environment (TracerPid=%d); daemon will start it cleanly', sid, tpid)
+@@ -376,6 +375,57 @@ def launch(sid, cfg):
+     env['USER'] = 'u0_a505'
+     env['TMUX_TMPDIR'] = str(PREFIX / 'var/run/tmux-10505')
+     env.update(HOME=str(HOME), PREFIX=str(PREFIX), TMPDIR=str(PREFIX / 'tmp'), PATH=f'{PREFIX}/bin:{PREFIX}/bin/applets:' + env.get('PATH', ''), GOMEMLIMIT='256MiB', GOGC='100')
++
++    if sid in BOUNDED_SUWAYOMI_SERVICES:
++        env['SUWAYOMI_BOUNDED_LOGGING'] = '1'
++        # Coordinated bounded capture companion:
++        # Resolve suwayomi_logs.py script path dynamically (supports flat layout and repo app/)
++        helper_path = _lib_dir / 'suwayomi_logs.py'
++        if not helper_path.exists():
++            helper_path = Path(__file__).resolve().parents[1] / 'app' / 'suwayomi_logs.py'
++        if not helper_path.exists():
++            helper_path = HOME / '.local/lib/mobile-server/suwayomi_logs.py'
++
++        proc = subprocess.Popen(
++            cfg['cmd'],
++            env=env,
++            stdin=subprocess.DEVNULL,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.STDOUT,
++            start_new_session=True,
++            close_fds=True,
++        )
++        try:
++            companion_env = env.copy()
++            companion_env['PYTHONPATH'] = str(_lib_dir)
++            companion_cmd = [sys.executable, str(helper_path), 'capture', sid]
++            c_proc = subprocess.Popen(
++                companion_cmd,
++                stdin=proc.stdout,
++                stdout=subprocess.DEVNULL,
++                stderr=subprocess.DEVNULL,
++                env=companion_env,
++                start_new_session=True,
++                close_fds=True,
++            )
++            # Register companion for automatic child reaping
++            Supervisor.capture_children.append(c_proc)
++        except Exception:
++            # If companion spawn fails, do not leave orphan service with dead pipe
++            terminate([(proc.pid, sid)])
++            if proc.stdout is not None:
++                proc.stdout.close()
++            raise
++        finally:
++            if proc.stdout is not None:
++                proc.stdout.close()
++        LOG.info('START %s pid=%s (bounded capture)', sid, proc.pid)
++        return proc
++
++    log_path = STATE / f'{sid}.log'
++    # Rotate before restart; do not truncate a running writer's file.
++    if log_path.exists() and log_path.stat().st_size > 2*1024*1024:
++        log_path.replace(log_path.with_suffix('.log.1'))
+     with log_path.open('ab', buffering=0) as out:
+         proc = subprocess.Popen(cfg['cmd'], env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True, close_fds=True)
+     LOG.info('START %s pid=%s', sid, proc.pid)
+@@ -383,6 +433,8 @@ def launch(sid, cfg):
+ 
+ 
+ class Supervisor:
++    capture_children = []
++
+     def __init__(self):
+         self.history = {}
+         self.children = []
+@@ -390,13 +442,15 @@ class Supervisor:
+     def cycle(self, initial=False):
+         report = {}
+         self.children = [p for p in self.children if p.poll() is None]
++        Supervisor.capture_children = [p for p in Supervisor.capture_children if p.poll() is None]
+         for sid, cfg in services().items():
+-            logfile = STATE / f'{sid}.log'
+-            if logfile.exists() and logfile.stat().st_size > 2*1024*1024:
+-                shutil.copyfile(logfile, logfile.with_suffix('.log.1'))
+-                # Keep existing process descriptors writing into the current file.
+-                with logfile.open('r+b') as out:
+-                    out.truncate(0)
++            if sid not in BOUNDED_SUWAYOMI_SERVICES:
++                logfile = STATE / f'{sid}.log'
++                if logfile.exists() and logfile.stat().st_size > 2*1024*1024:
++                    shutil.copyfile(logfile, logfile.with_suffix('.log.1'))
++                    # Keep existing process descriptors writing into the current file.
++                    with logfile.open('r+b') as out:
++                        out.truncate(0)
+             if (DISABLED / sid).exists() or (PAUSED.exists() and sid != 'ssh'):
+                 report[sid] = {'state': 'disabled'}
+                 continue
+diff --git a/scripts/suwayomi_daily_update.py b/scripts/suwayomi_daily_update.py
+index 2a331cc..9c1ea50 100755
+--- a/scripts/suwayomi_daily_update.py
++++ b/scripts/suwayomi_daily_update.py
+@@ -32,7 +32,14 @@ _pid_file_fd = None
+ def log(msg: str):
+     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+     formatted = f"[{timestamp}] {msg}"
+-    print(formatted, flush=True)
++    try:
++        print(formatted, flush=True)
++    except BrokenPipeError:
++        # A failed capture companion must not stop the update scheduler.
++        pass
++    if os.environ.get("SUWAYOMI_BOUNDED_LOGGING") == "1":
++        # In bounded capture mode, stdout is captured by companion; omit separate file writes.
++        return
+     try:
+         LOG_DIR.mkdir(parents=True, exist_ok=True)
+         with LOG_FILE.open("a", encoding="utf-8") as f:
+diff --git a/scripts/suwayomi_graphql_filter.py b/scripts/suwayomi_graphql_filter.py
+index 088e9e9..97ddd36 100755
+--- a/scripts/suwayomi_graphql_filter.py
++++ b/scripts/suwayomi_graphql_filter.py
+@@ -13,6 +13,7 @@ import json
+ import logging
+ from logging.handlers import RotatingFileHandler
+ import os
++import re
+ from pathlib import Path
+ import threading
+ import time
+@@ -53,6 +54,14 @@ logger.addHandler(logging.NullHandler())
+ 
+ 
+ def setup_logging():
++    if os.environ.get("SUWAYOMI_BOUNDED_LOGGING") == "1":
++        # In bounded capture mode, route output to stdout where supervisor capture companion records it.
++        handler = logging.StreamHandler(sys.stdout)
++        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
++        logger.addHandler(handler)
++        logger.setLevel(logging.INFO)
++        return
++
+     LOG_DIR.mkdir(parents=True, exist_ok=True)
+     handler = RotatingFileHandler(LOG_DIR / "graphql_filter.log", maxBytes=1024 * 1024, backupCount=2)
+     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+@@ -345,6 +354,23 @@ class FilterHandler(http.server.BaseHTTPRequestHandler):
+     upstream = UPSTREAM
+     cache = cache
+ 
++    def handle_one_request(self):
++        started = time.monotonic()
++        self._activity_status = None
++        self._activity_operation = 'unnamed'
++        try:
++            super().handle_one_request()
++        finally:
++            if os.environ.get('SUWAYOMI_BOUNDED_LOGGING') == '1' and getattr(self, 'command', None) in ('GET', 'POST') and self.path != '/healthz':
++                route = 'graphql' if self.path.split('?', 1)[0].endswith('/api/graphql') else 'asset'
++                logger.info('request method=%s route=%s operation=%s status=%s elapsedMs=%d',
++                            self.command, route, self._activity_operation,
++                            self._activity_status, int((time.monotonic() - started) * 1000))
++
++    def send_response(self, code, message=None):
++        self._activity_status = code
++        return super().send_response(code, message)
++
+     def log_message(self, format, *args):
+         pass  # Quiet logging for performance
+ 
+@@ -419,6 +445,15 @@ class FilterHandler(http.server.BaseHTTPRequestHandler):
+ 
+         body = self.rfile.read(content_len) if content_len > 0 else b""
+ 
++        if os.environ.get('SUWAYOMI_BOUNDED_LOGGING') == '1':
++            # Operation identifiers only; request bodies and headers never enter logs.
++            prefix = body[:4096]
++            operation = re.search(rb'"operationName"\s*:\s*"([A-Za-z_][A-Za-z0-9_]{0,127})"', prefix)
++            if operation is None:
++                operation = re.search(rb'\b(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]{0,127})', prefix)
++            if operation is not None:
++                self._activity_operation = operation[1].decode('ascii')
++
+         # Filter updates queries (Tsumiru uses GetChapterWithMangaPage)
+         if is_recognized_updates_query(body):
+             # Validate recognized payload shape BEFORE category lookup
+diff --git a/scripts/termux_activation.py b/scripts/termux_activation.py
+index ebdb4dd..6a0f30d 100644
+--- a/scripts/termux_activation.py
++++ b/scripts/termux_activation.py
+@@ -224,7 +224,7 @@ def validate_catalog_transition(
+             raise RuntimeError(
+                 f"Candidate suwayomi_scheduler cmd drift: expected {expected_cmd!r}, got {sched_cfg.get('cmd')!r}"
+             )
+-    elif profile == "suwayomi-jar":
++    elif profile in ("suwayomi-jar", "suwayomi-bounded-logging"):
+         if len(prior_keys) not in (16, 17, 18):
+             raise RuntimeError(
+                 f"suwayomi-jar profile requires exact 16 or 17 prior services, found {len(prior_keys)}"
+diff --git a/tests/test_suwayomi_capture_lifecycle.py b/tests/test_suwayomi_capture_lifecycle.py
+new file mode 100644
+index 0000000..a1a3c1c
+--- /dev/null
++++ b/tests/test_suwayomi_capture_lifecycle.py
+@@ -0,0 +1,71 @@
++import json
++import os
++from pathlib import Path
++import shutil
++import signal
++import subprocess
++import sys
++import tempfile
++import time
++import unittest
++
++
++class CaptureLifecycleTests(unittest.TestCase):
++    def test_flat_helper_survives_control_exit_and_java_survives_capture_exit(self):
++        with tempfile.TemporaryDirectory() as temp:
++            root = Path(temp)
++            library = root / 'flat-lib'
++            library.mkdir()
++            shutil.copy2(Path(__file__).parents[1] / 'app/suwayomi_logs.py', library)
++            java = root / 'Heartbeat.java'
++            java.write_text('''
++import java.nio.file.*;
++public class Heartbeat {
++  public static void main(String[] args) throws Exception {
++    for (int i = 0; i < 300; i++) {
++      System.out.println("heartbeat=" + i);
++      Files.writeString(Path.of(args[0]), Integer.toString(i));
++      Thread.sleep(20);
++    }
++  }
++}
++''')
++            subprocess.run(['javac', '--release', '21', str(java)], check=True, capture_output=True)
++            control = root / 'control.py'
++            supervisor = Path(__file__).parents[1] / 'scripts/server_supervisor.py'
++            control.write_text('''
++import builtins, importlib.util, json, os, pathlib, sys
++original = builtins.open
++def guarded(path, *args, **kwargs):
++    if str(path).endswith('/parent_pid.txt'): raise OSError('test guard')
++    return original(path, *args, **kwargs)
++builtins.open = guarded
++spec = importlib.util.spec_from_file_location('supervisor', sys.argv[1])
++supervisor = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(supervisor)
++builtins.open = original
++root = pathlib.Path(sys.argv[2])
++supervisor._lib_dir = root / 'flat-lib'
++supervisor.HOME = root / 'home'
++supervisor.PREFIX = pathlib.Path('/usr')
++os.environ['SUWAYOMI_LOG_DIR'] = str(root / 'logs')
++proc = supervisor.launch('suwayomi', {'cmd': [sys.argv[3], '-cp', str(root), 'Heartbeat', str(root / 'heartbeat')]})
++print(json.dumps({'java':proc.pid, 'capture':supervisor.Supervisor.capture_children[-1].pid}), flush=True)
++''')
++            result = subprocess.run([sys.executable, str(control), str(supervisor), str(root), shutil.which('java')], cwd='/', check=True, capture_output=True, text=True)
++            children = json.loads(result.stdout)
++            try:
++                active = root / 'logs/suwayomi.log'
++                deadline = time.monotonic() + 3
++                while time.monotonic() < deadline and not active.exists(): time.sleep(.02)
++                self.assertTrue(active.exists(), 'Detached capture died with the control parent')
++                self.assertIn('heartbeat=', active.read_text())
++                before = int((root / 'heartbeat').read_text())
++                os.kill(children['capture'], signal.SIGTERM)
++                time.sleep(.2)
++                after = int((root / 'heartbeat').read_text())
++                self.assertGreater(after, before, 'Java stopped after its capture reader exited')
++            finally:
++                for pid in children.values():
++                    try: os.kill(pid, signal.SIGTERM)
++                    except ProcessLookupError: pass
+diff --git a/tests/test_suwayomi_logging_acceptance.py b/tests/test_suwayomi_logging_acceptance.py
+new file mode 100644
+index 0000000..c1df1c7
+--- /dev/null
++++ b/tests/test_suwayomi_logging_acceptance.py
+@@ -0,0 +1,142 @@
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++import time
++import unittest
++from unittest.mock import patch
++
++from app import suwayomi_logs as logs
++
++
++class LoggingAcceptanceTests(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.root = Path(self.temp.name)
++
++    def test_live_small_line_arrives_before_pipe_eof(self):
++        read_fd, write_fd = os.pipe()
++        helper = Path(logs.__file__)
++        child = subprocess.Popen([sys.executable, str(helper), 'capture', 'probe', str(self.root / 'logs')], stdin=read_fd)
++        os.close(read_fd)
++        try:
++            os.write(write_fd, b'live small event\n')
++            active = self.root / 'logs/suwayomi.log'
++            deadline = time.monotonic() + 1
++            while time.monotonic() < deadline and not active.exists():
++                time.sleep(.01)
++            self.assertTrue(active.exists(), 'Collector buffered a small live event until EOF')
++        finally:
++            os.close(write_fd)
++            child.wait(timeout=3)
++        self.assertEqual(child.returncode, 0)
++
++    def test_truncated_json_secret_never_reaches_disk(self):
++        text = '{"password": "' + 'private' * 12000
++        store = logs.BoundedLogStore(self.root / 'logs')
++        import io
++        logs.capture_stream(io.BytesIO(text.encode()), store, 'probe')
++        self.assertNotIn('private', store.read_active())
++
++    def test_existing_segments_are_normalized_before_append(self):
++        store = logs.BoundedLogStore(self.root / 'logs', segment_size=1000, total_budget=10000)
++        store.active_file.write_text('old event\n' * 300)
++        (store.log_dir / 'suwayomi.log.1').write_text('older event\n' * 300)
++        store.append('probe', 'new event')
++        for file in store.log_dir.glob('suwayomi.log*'):
++            self.assertLessEqual(file.stat().st_size, 1000)
++
++    def test_failed_migration_does_not_delete_history_or_mark_success(self):
++        legacy = self.root / 'suwayomi/data/logs/application.log'
++        legacy.parent.mkdir(parents=True)
++        legacy.write_text('old event\n')
++        store = logs.BoundedLogStore(self.root / 'logs')
++        with patch.object(store, '_rotate_if_needed', return_value=False):
++            with self.assertRaises((OSError, RuntimeError)):
++                store.import_legacy_logs_offline([legacy], home=self.root)
++        self.assertTrue(legacy.exists())
++        self.assertFalse(store.marker_file.exists())
++
++    def test_real_default_budget(self):
++        store = logs.BoundedLogStore(self.root / 'logs')
++        for i in range(340):
++            store.append('probe', f'event={i} ' + 'z' * 64000)
++            self.assertLessEqual(store.total_disk_bytes(), 20000000)
++        self.assertIn('event=339', store.read_active())
++        self.assertGreater(store.total_disk_bytes(), 18000000)
++
++
++if __name__ == '__main__':
++    unittest.main()
++
++class LoggingReleaseProfileTests(unittest.TestCase):
++    def test_profile_restarts_only_suwayomi_group(self):
++        from scripts import release_activation as release
++        entries = [{'remote': '/data/data/com.termux/files/home/.local/lib/mobile-server/suwayomi_logs.py', 'action': 'CREATE'},
++                   {'remote': release.SUPERVISOR_REMOTE, 'action': 'REPLACE'},
++                   {'remote': release.SUWAYOMI_JAR_REMOTE, 'action': 'REPLACE'}]
++        affected, daemon, _ = release.map_changed_destinations(entries, profile='suwayomi-bounded-logging')
++        self.assertEqual(affected, {'suwayomi', 'suwayomi_filter', 'suwayomi_scheduler'})
++        self.assertTrue(daemon)
++        entries.append({'remote': '/data/data/com.termux/files/usr/bin/dashboard', 'action': 'REPLACE'})
++        with self.assertRaises(release.ActivationError):
++            release.map_changed_destinations(entries, profile='suwayomi-bounded-logging')
++
++class ControlledLoggingActivationTests(unittest.TestCase):
++    def fixture(self):
++        from tests import test_release_activation as fixtures
++        fixture = fixtures.TestReleaseActivation()
++        fixture.setUp()
++        self.addCleanup(fixture.tearDown)
++        bundle, preconditions, live, transaction = fixture._build_jar_fixture()
++        helper = bundle / 'app/suwayomi_logs.py'
++        helper.write_bytes(Path(logs.__file__).read_bytes())
++        release = fixtures.ra
++        preconditions['files'] = [item for item in preconditions['files'] if item['path'] != release.SUWAYOMI_LOG_HELPER_REMOTE]
++        preconditions['files'].append({'path': release.SUWAYOMI_LOG_HELPER_REMOTE, 'kind': 'absent'})
++        (live / 'home/.local/lib/mobile-server/suwayomi_logs.py').unlink(missing_ok=True)
++        namespace = {}
++        exec(fixtures.reviewed_16_catalog_source(), namespace)
++        driver = fixtures.FakeLifecycleDriver(namespace['runtime_services'](str(live / 'home'), str(live / 'usr')))
++        for index, sid in enumerate(('suwayomi', 'suwayomi_filter', 'suwayomi_scheduler')):
++            driver.running_processes[sid] = [(1001 + index, sid + '-prior')]
++        original = live / 'home/suwayomi/data/logs/application.log'
++        original.parent.mkdir(parents=True)
++        original.write_text('old event password=privateHistory\n')
++        return release, bundle, preconditions, live, transaction, driver, original
++
++    def test_migration_occurs_while_services_are_stopped_and_flags_survive(self):
++        release, bundle, preconditions, live, transaction, driver, original = self.fixture()
++        original_migrate = release.migrate_bounded_suwayomi_logs
++        def verified_migration(root, manifest):
++            for sid in release.SUWAYOMI_LOGGING_SERVICES:
++                self.assertFalse(driver.matching_processes(sid))
++            self.assertFalse(driver.is_daemon_running())
++            original_migrate(root, manifest)
++        disabled = live / 'home/.config/services_disabled/suwayomi_filter'
++        disabled.parent.mkdir(parents=True, exist_ok=True)
++        disabled.write_bytes(b'user-disabled')
++        driver.running_processes['suwayomi_filter'] = []
++        with patch.object(release, 'migrate_bounded_suwayomi_logs', side_effect=verified_migration):
++            result = release.apply(bundle, preconditions, transaction, live, driver=driver, profile='suwayomi-bounded-logging')
++        self.assertEqual(result['state'], release.STATE_COMPLETED)
++        self.assertEqual(set(result['reactivated_services']), {'suwayomi', 'suwayomi_scheduler'})
++        self.assertEqual(disabled.read_bytes(), b'user-disabled')
++        self.assertFalse(original.exists())
++        retained = (live / 'shared/Suwayomi/logs/suwayomi.log').read_text()
++        self.assertIn('old event', retained)
++        self.assertNotIn('privateHistory', retained)
++        self.assertEqual(release.recover(transaction, live, driver=driver)['state'], release.STATE_COMPLETED)
++
++    def test_health_failure_rolls_back_files_and_can_recover(self):
++        release, bundle, preconditions, live, transaction, driver, original = self.fixture()
++        jar = live / 'home/suwayomi/bin/Suwayomi-Server.jar'
++        before = jar.read_bytes()
++        driver.fail_candidate_health.add('suwayomi_filter')
++        with self.assertRaises(release.HealthCheckError):
++            release.apply(bundle, preconditions, transaction, live, driver=driver, health_timeout=.1, profile='suwayomi-bounded-logging')
++        self.assertEqual(jar.read_bytes(), before)
++        self.assertFalse((live / 'home/.local/lib/mobile-server/suwayomi_logs.py').exists())
++        self.assertEqual(release.recover(transaction, live, driver=driver)['state'], release.STATE_ROLLED_BACK)
+diff --git a/tests/test_suwayomi_logs.py b/tests/test_suwayomi_logs.py
+new file mode 100644
+index 0000000..0fad0da
+--- /dev/null
++++ b/tests/test_suwayomi_logs.py
+@@ -0,0 +1,210 @@
++import gzip
++import io
++import multiprocessing
++import os
++from pathlib import Path
++import shutil
++import tempfile
++import time
++import unittest
++
++from app.suwayomi_logs import (
++    BoundedLogStore,
++    redact_sensitive_text,
++    DEFAULT_LOG_DIR,
++    SEGMENT_SIZE_BYTES,
++    TOTAL_BUDGET_BYTES,
++    MAX_ARCHIVES,
++    capture_stream,
++    read_bounded_records,
++)
++
++
++def _process_worker(log_dir, sid, count, line_len):
++    store = BoundedLogStore(log_dir, segment_size=5_000, total_budget=25_000, max_archives=4)
++    payload = "x" * line_len
++    for i in range(count):
++        store.append(sid, f"proc_{sid}_line_{i}_{payload}")
++
++
++class TestSuwayomiLogsComprehensive(unittest.TestCase):
++    def setUp(self):
++        self.tmpdir = tempfile.mkdtemp()
++        self.log_dir = os.path.join(self.tmpdir, "logs")
++
++    def tearDown(self):
++        shutil.rmtree(self.tmpdir, ignore_errors=True)
++
++    def test_constants(self):
++        self.assertEqual(TOTAL_BUDGET_BYTES, 20_000_000)
++        self.assertEqual(SEGMENT_SIZE_BYTES, 2_000_000)
++        self.assertEqual(MAX_ARCHIVES, 9)
++
++    def test_redaction_comprehensive(self):
++        cases = [
++            ("https://host?access_token=secretAAA&page=2", "https://host?access_token: [REDACTED]&page=2"),
++            ("http://user:pass@host/path", "http://[REDACTED]@host/path"),
++            ('{"password": "secretBBB"}', '{"password": "[REDACTED]"}'),
++            ('{"access_token": "secretCCC"}', '{"access_token": "[REDACTED]"}'),
++            ('"refreshToken": "secretDDD"', '"refreshToken": "[REDACTED]"'),
++            ("Cookie: id=secretCCC; theme=dark; session=abc", "Cookie: id=[REDACTED]; theme=[REDACTED]; session=[REDACTED]"),
++            ("Set-Cookie: session=xyz123; Path=/; HttpOnly", "Set-Cookie: session=[REDACTED]; Path=/; HttpOnly"),
++            ("Authorization: Bearer mySecretToken", "Authorization: Bearer [REDACTED]"),
++            ("Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic [REDACTED]"),
++            ("User pass: plainSecret in text", "User pass=[REDACTED] in text"),
++        ]
++        for raw, expected in cases:
++            redacted = redact_sensitive_text(raw)
++            self.assertIn('[REDACTED]', redacted)
++            self.assertNotIn("secretAAA", redacted)
++            self.assertNotIn("secretBBB", redacted)
++            self.assertNotIn("secretCCC", redacted)
++            self.assertNotIn("secretDDD", redacted)
++            self.assertNotIn("xyz123", redacted)
++            self.assertNotIn("mySecretToken", redacted)
++            self.assertNotIn("plainSecret", redacted)
++            self.assertNotIn("user:pass", redacted)
++
++    def test_unicode_boundary_and_strict_utf8_decoding(self):
++        # segment_size = 101 bytes, total_budget = 505 bytes
++        store = BoundedLogStore(self.log_dir, segment_size=101, total_budget=505, max_archives=4)
++        store.append("probe", "漢" * 1000)
++
++        # Raw file bytes must decode strictly as UTF-8 without raising
++        raw_bytes = store.active_file.read_bytes()
++        self.assertLessEqual(len(raw_bytes), 101)
++        text = raw_bytes.decode("utf-8")
++        self.assertIn("probe", text)
++        self.assertIn("... [TRUNCATED]", text)
++
++    def test_constructor_limits_and_symlink_rejection(self):
++        with self.assertRaises(ValueError):
++            BoundedLogStore(self.log_dir, segment_size=0)
++        with self.assertRaises(ValueError):
++            BoundedLogStore(self.log_dir, segment_size=1000, total_budget=500)
++        with self.assertRaises(ValueError):
++            BoundedLogStore(self.log_dir, max_archives=-1)
++
++        # Test symlink rejection
++        sym_dir = os.path.join(self.tmpdir, "sym_logs")
++        os.makedirs(sym_dir, exist_ok=True)
++        active_sym = os.path.join(sym_dir, "suwayomi.log")
++        target_file = os.path.join(self.tmpdir, "target.txt")
++        Path(target_file).touch()
++        os.symlink(target_file, active_sym)
++
++        with self.assertRaises(ValueError):
++            BoundedLogStore(sym_dir, segment_size=1000, total_budget=5000)
++
++    def test_fail_closed_on_rotation_disk_error(self):
++        store = BoundedLogStore(self.log_dir, segment_size=100, total_budget=300, max_archives=2)
++        store.append("srv", "first line")
++        
++        # Simulate disk failure during rotation: replace _rotate_if_needed to return False
++        original_rotate = store._rotate_if_needed
++        try:
++            store._rotate_if_needed = lambda incoming: False
++            store.append("srv", "second line that fails rotation")
++            # Active file should not contain second line
++            self.assertNotIn("second line", store.read_active())
++        finally:
++            store._rotate_if_needed = original_rotate
++
++    def test_multi_process_writers_and_strict_cap(self):
++        store = BoundedLogStore(self.log_dir, segment_size=5_000, total_budget=25_000, max_archives=4)
++        procs = []
++        for i in range(4):
++            p = multiprocessing.Process(target=_process_worker, args=(self.log_dir, f"p{i}", 30, 200))
++            procs.append(p)
++            p.start()
++        for p in procs:
++            p.join(timeout=10)
++
++        total_disk = store.total_disk_bytes()
++        self.assertLessEqual(total_disk, 25_000)
++        self.assertGreater(total_disk, 0)
++
++        # Verify all files decode cleanly under strict UTF-8
++        for f in Path(self.log_dir).glob("suwayomi.log*"):
++            if f.is_file():
++                f.read_bytes().decode("utf-8")
++
++    def test_capture_stream_bounded_memory_no_newline(self):
++        store = BoundedLogStore(self.log_dir, segment_size=10_000, total_budget=50_000, max_archives=4)
++        # Giant line with no newline (200KB) followed by valid line
++        giant_stream = io.BytesIO(b"X" * (200 * 1024) + b"\nnext valid line token: mySecret\n")
++        capture_stream(giant_stream, store, "stream_test")
++
++        # Read active plus rotated archives to verify ingestion across rotation
++        all_content = store.read_active()
++        for arch in Path(self.log_dir).glob("suwayomi.log.*"):
++            if arch.is_file():
++                all_content += "\n" + arch.read_text(encoding="utf-8", errors="replace")
++
++        self.assertIn("... [TRUNCATED]", all_content)
++        self.assertIn("next valid line", all_content)
++        self.assertIn("[REDACTED]", all_content)
++        self.assertNotIn("mySecret", all_content)
++
++    def test_offline_legacy_migration(self):
++        legacy_dir = os.path.join(self.tmpdir, "suwayomi/data/logs")
++        os.makedirs(legacy_dir, exist_ok=True)
++        app_log = os.path.join(legacy_dir, "application.log")
++        with open(app_log, "w", encoding="utf-8") as f:
++            f.write("Line 1 with password=oldSecret\nLine 2\n")
++
++        app_gz = os.path.join(legacy_dir, "application_2026-10-30_0.log.gz")
++        with gzip.open(app_gz, "wt", encoding="utf-8") as gz:
++            gz.write("GZ archive line with token: gzSecret\n")
++
++        store = BoundedLogStore(self.log_dir, segment_size=10_000, total_budget=50_000, max_archives=4)
++        count = store.import_legacy_logs_offline([app_log, app_gz], home=Path(self.tmpdir))
++        self.assertEqual(count, 3)
++
++        # Original files must be deleted after success
++        self.assertFalse(os.path.exists(app_log))
++        self.assertFalse(os.path.exists(app_gz))
++
++        content = store.read_active()
++        self.assertIn("[legacy] Line 1 with password=[REDACTED]", content)
++        self.assertIn("GZ archive line with token: [REDACTED]", content)
++        self.assertNotIn("oldSecret", content)
++        self.assertNotIn("gzSecret", content)
++
++        # Second migration must be a no-op (idempotent marker exists)
++        repeat_count = store.import_legacy_logs_offline([app_log, app_gz], home=Path(self.tmpdir))
++        self.assertEqual(repeat_count, 0)
++
++
++    def test_subprocess_stream_eof_and_parent_exit(self):
++        # Verify capture companion reading from a real subprocess pipe survives and exits cleanly on EOF
++        store = BoundedLogStore(self.log_dir, segment_size=10_000, total_budget=50_000, max_archives=4)
++        r_fd, w_fd = os.pipe()
++        
++        # Companion thread/process reading r_fd
++        import subprocess, sys
++        helper_path = Path(__file__).resolve().parents[1] / "app" / "suwayomi_logs.py"
++        companion = subprocess.Popen(
++            [sys.executable, str(helper_path), "capture", "pipe_test", str(self.log_dir)],
++            stdin=r_fd,
++            stdout=subprocess.DEVNULL,
++            stderr=subprocess.DEVNULL,
++            close_fds=True,
++        )
++        os.close(r_fd)
++
++        # Write data then close writer to signal EOF
++        with os.fdopen(w_fd, "w") as writer:
++            writer.write("message from subprocess pipe\n")
++            writer.flush()
++        
++        # Companion must terminate cleanly on EOF
++        exit_code = companion.wait(timeout=5)
++        self.assertEqual(exit_code, 0)
++
++        active = store.read_active()
++        self.assertIn("message from subprocess pipe", active)
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -1,0 +1,27 @@
+diff --git a/AndroidCompat/Config/src/main/java/xyz/nulldev/ts/config/Logging.kt b/AndroidCompat/Config/src/main/java/xyz/nulldev/ts/config/Logging.kt
+index dcaf705..362226c 100644
+--- a/AndroidCompat/Config/src/main/java/xyz/nulldev/ts/config/Logging.kt
++++ b/AndroidCompat/Config/src/main/java/xyz/nulldev/ts/config/Logging.kt
+@@ -81,6 +81,10 @@ private fun getLogger(name: String): ch.qos.logback.classic.Logger {
+     return context.getLogger(name)
+ }
+ 
++fun isBoundedLoggingActive(): Boolean =
++    System.getenv("SUWAYOMI_BOUNDED_LOGGING") == "1" ||
++        System.getProperty("suwayomi.tachidesk.config.server.boundedLogging", "false").toBoolean()
++
+ fun initLoggerConfig(
+     appRootPath: String,
+     maxFiles: Int,
+@@ -91,7 +95,10 @@ fun initLoggerConfig(
+     val logger = getBaseLogger()
+ 
+     // logback logs to the console by default (at least when adding a console appender logs in the console are duplicated)
+-    logger.addAppender(createRollingFileAppender(context, "$appRootPath/logs", maxFiles, maxFileSize, maxTotalSize))
++    // Bounded mode uses supervisor capture instead of a duplicate file appender.
++    if (!isBoundedLoggingActive()) {
++        logger.addAppender(createRollingFileAppender(context, "$appRootPath/logs", maxFiles, maxFileSize, maxTotalSize))
++    }
+ 
+     // set "kotlin exposed" log level
+     setLogLevelFor("Exposed", Level.ERROR)
