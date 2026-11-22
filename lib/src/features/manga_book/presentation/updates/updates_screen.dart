@@ -392,6 +392,7 @@ class _UpdatesPagedListState extends State<_UpdatesPagedList> {
             state: state,
             fetchNextPage: fetchNextPage,
             builderDelegate: delegate,
+            shrinkWrapFirstPageIndicators: state.status == PagingStatus.noItemsFound,
           );
         }
         Widget desktopListing(
@@ -531,6 +532,8 @@ class _UpdatesPagedListState extends State<_UpdatesPagedList> {
           fetchNextPage: fetchNextPage,
           builderDelegate: delegate,
           layoutProtocol: PagedLayoutProtocol.sliver,
+          // Emoticons uses LayoutBuilder, which cannot supply SliverFillRemaining's intrinsic height.
+          shrinkWrapFirstPageIndicators: state.status == PagingStatus.noItemsFound,
           completedListingBuilder: desktopListing,
           loadingListingBuilder: desktopListing,
           errorListingBuilder: desktopListing,
@@ -631,6 +634,8 @@ class UpdatesScreen extends HookConsumerWidget {
       selectionAnchor.value = null;
       controller.refresh();
     }, []);
+    // Pop can finish before the reader's final write; refresh after the server confirms it.
+    ref.listen(updatesReadRevisionProvider, (_, _) => resetList());
     // Custom covers arrive through meta the cached rows were fetched without.
     final coverRevision = ref.watch(customCoverRevisionProvider);
     final isCoverRevisionMount = useRef(true);

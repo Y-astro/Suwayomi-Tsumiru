@@ -14,6 +14,9 @@ unless explicitly requested. Push completed, verified changes to the user's fork
    markers after a successful title refresh and synchronization with the latest
    chapters. Retry error-marked titles at one hour and two hours after the main
    library update finishes, then stop automatic retries for that update cycle.
+   Updates follow-up: confirmed read/unread writes refresh its cached cards and
+   chapter badges, including saves finishing after reader exit. Unread-only
+   filtering removes fully read entries and supports an empty result.
 3. **Detailed bounded logs — queued.** Add detailed server and app diagnostics
    with a 20 MB size limit. Confirm the exact retention/size policy when this
    item starts. The user authorized server access through ADB on the Redmi K20

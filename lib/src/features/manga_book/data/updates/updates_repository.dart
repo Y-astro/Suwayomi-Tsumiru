@@ -20,6 +20,18 @@ import './graphql/__generated__/query.graphql.dart';
 
 part 'updates_repository.g.dart';
 
+/// Updates keeps its own paging state, outside the chapter and library providers.
+final updatesReadRevisionProvider = NotifierProvider<UpdatesReadRevision, int>(
+  UpdatesReadRevision.new,
+);
+
+class UpdatesReadRevision extends Notifier<int> {
+  @override
+  int build() => 0;
+
+  void bump() => state++;
+}
+
 /// Pagination offsets must advance by this size to avoid overlapping pages.
 const int updatesPageSize = 50;
 
