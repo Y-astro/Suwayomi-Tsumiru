@@ -7,11 +7,13 @@
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:graphql/client.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tsumiru/src/features/browse_center/presentation/extension/controller/extension_update_badge.dart';
 import 'package:tsumiru/src/features/library/presentation/library/controller/library_manga_list.dart';
+import 'package:tsumiru/src/features/manga_book/data/updates/updates_repository.dart';
 import 'package:tsumiru/src/features/manga_book/domain/manga/graphql/__generated__/fragment.graphql.dart';
 import 'package:tsumiru/src/features/manga_book/domain/manga/manga_model.dart';
 import 'package:tsumiru/src/features/offline/data/offline_nav_status.dart';
@@ -35,6 +37,7 @@ Future<void> _pump(
   ValueChanged<int>? onDestinationSelected,
   bool downloadsPaused = false,
   List<MangaDto>? Function()? library,
+  UpdatesRepository Function()? updatesRepository,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
@@ -58,6 +61,8 @@ Future<void> _pump(
         downloadsPausedBadgeProvider.overrideWith((ref) => downloadsPaused),
         extensionUpdateBadgeCountProvider.overrideWith((ref) async => 0),
         libraryMangaListProvider.overrideWith((ref) async => library?.call()),
+        if (updatesRepository != null)
+          updatesRepositoryProvider.overrideWith((ref) => updatesRepository()),
       ],
       child: MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -114,28 +119,49 @@ MangaDto _manga(int id, int unreadCount) => Fragment$MangaDto(
   ),
 );
 
+class _StubUpdatesRepository extends UpdatesRepository {
+  _StubUpdatesRepository(this.count) : super(_dummyClient(), _dummyClient());
+  int? count;
+
+  @override
+  Future<int?> getUnreadUpdateChapterCount() async => count;
+}
+
+GraphQLClient _dummyClient() => GraphQLClient(
+  link: Link.function((request, [forward]) => const Stream.empty()),
+  cache: GraphQLCache(),
+);
+
 void main() {
-  testWidgets('sidebar counts each title with unread updates once', (
+  testWidgets('sidebar counts library titles and unread chapters independently', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues(const {});
     final prefs = await SharedPreferences.getInstance();
     var library = [_manga(1, 5), _manga(2, 1), _manga(3, 0)];
-    await _pump(tester, prefs, library: () => library);
+    final repo = _StubUpdatesRepository(6);
+    await _pump(
+      tester,
+      prefs,
+      library: () => library,
+      updatesRepository: () => repo,
+    );
     final l10n = _l10n(tester);
     expect(find.text('${l10n.library} (3)'), findsOneWidget);
-    expect(find.text('${l10n.updates} (2)'), findsOneWidget);
+    expect(find.text('${l10n.updates} (6)'), findsOneWidget);
     expect(find.text(l10n.history), findsOneWidget);
 
     final container = ProviderScope.containerOf(
       tester.element(find.byType(DesktopSidebar)),
     );
     library = [_manga(1, 4), _manga(2, 1), _manga(3, 0)];
+    repo.count = 5;
     container.invalidate(libraryMangaListProvider);
     await tester.pumpAndSettle();
-    expect(find.text('${l10n.updates} (2)'), findsOneWidget);
+    expect(find.text('${l10n.updates} (5)'), findsOneWidget);
 
     library = [_manga(1, 0), _manga(2, 0), _manga(3, 0)];
+    repo.count = 0;
     container.invalidate(libraryMangaListProvider);
     await tester.pumpAndSettle();
     expect(find.text('${l10n.library} (3)'), findsOneWidget);

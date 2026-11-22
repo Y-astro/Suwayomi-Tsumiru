@@ -107,6 +107,18 @@ class _Covers extends OfflineCoverWarmer {
   }
 }
 
+class _CountingUpdates extends UpdatesRepository {
+  _CountingUpdates(this.count) : super(_client(), _client());
+  int? count;
+  int requests = 0;
+
+  @override
+  Future<int?> getUnreadUpdateChapterCount() async {
+    requests++;
+    return count;
+  }
+}
+
 MangaDto _manga({int unreadCount = 1}) => MangaDto(
   id: 1,
   title: 'First account',
@@ -129,6 +141,16 @@ MangaDto _manga({int unreadCount = 1}) => MangaDto(
   ),
 );
 
+class _Running extends Notifier<AsyncValue<bool?>> {
+  @override
+  AsyncValue<bool?> build() => const AsyncData(false);
+  void set(AsyncValue<bool?> value) => state = value;
+}
+
+final _runningProvider = NotifierProvider<_Running, AsyncValue<bool?>>(
+  _Running.new,
+);
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late ProviderContainer container;
@@ -137,6 +159,7 @@ void main() {
   late _Details details;
   late _Sync sync;
   late _Covers covers;
+  late _CountingUpdates updates;
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
@@ -146,13 +169,15 @@ void main() {
     details = _Details();
     sync = _Sync();
     covers = _Covers();
+    updates = _CountingUpdates(2);
     container = ProviderContainer(
       overrides: [
         sharedPreferencesProvider.overrideWithValue(prefs),
         authCredentialsStoreProvider.overrideWith(() => auth),
         categoryRepositoryProvider.overrideWithValue(library),
-        updateRunningSocketProvider.overrideWithValue(
-          const AsyncData<bool?>(false),
+        updatesRepositoryProvider.overrideWithValue(updates),
+        updateRunningSocketProvider.overrideWith(
+          (ref) => ref.watch(_runningProvider),
         ),
         mangaBookRepositoryProvider.overrideWithValue(details),
         offlineReadDatabaseProvider.overrideWithValue(null),
@@ -181,27 +206,58 @@ void main() {
   );
 
   test(
-    'finishing a title refreshes the unread title count once for a burst of writes',
+    'confirmed read changes refresh the count once for a burst of writes',
     () async {
       final counted = Completer<NavCounts>();
       container.listen(navCountsProvider, (_, next) {
-        if (next != null && next.updates == 0) counted.complete(next);
+        if (next != null && next.updates == 1) counted.complete(next);
       });
       await library.entered.future;
       library.response.complete([_manga(unreadCount: 2)]);
       await container.read(libraryMangaListProvider.future);
-      expect(container.read(navCountsProvider), (library: 1, updates: 1));
+      await container.read(updatesUnreadChapterCountProvider.future);
+      expect(container.read(navCountsProvider), (library: 1, updates: 2));
 
-      library.nextResponse = Future.value([_manga(unreadCount: 0)]);
+      library.nextResponse = Future.value([_manga(unreadCount: 1)]);
+      updates.count = 1;
       final revision = container.read(updatesReadRevisionProvider.notifier);
       revision.bump();
       revision.bump();
 
       expect(await counted.future.timeout(const Duration(seconds: 3)), (
         library: 1,
-        updates: 0,
+        updates: 1,
       ));
       expect(library.requests, 2);
+      expect(updates.requests, 2);
+    },
+  );
+  test(
+    'completed update refreshes the feed count through the real library provider',
+    () async {
+      final counted = Completer<NavCounts>();
+      container.listen(navCountsProvider, (_, next) {
+        if (next?.updates == 7 && !counted.isCompleted) counted.complete(next);
+      });
+      await library.entered.future;
+      library.response.complete([_manga(unreadCount: 20)]);
+      await container.read(libraryMangaListProvider.future);
+      await container.read(updatesUnreadChapterCountProvider.future);
+      expect(container.read(navCountsProvider), (library: 1, updates: 2));
+      library.nextResponse = Future.value([_manga(unreadCount: 30)]);
+      updates.count = 7;
+      final running = container.read(_runningProvider.notifier);
+      running.set(const AsyncData(true));
+      await container.pump();
+      running.set(const AsyncLoading());
+      await container.pump();
+      running.set(const AsyncData(false));
+      expect(await counted.future.timeout(const Duration(seconds: 3)), (
+        library: 1,
+        updates: 7,
+      ));
+      expect(library.requests, 2);
+      expect(updates.requests, 2);
     },
   );
 }

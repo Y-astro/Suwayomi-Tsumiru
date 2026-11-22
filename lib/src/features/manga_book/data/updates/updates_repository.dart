@@ -76,6 +76,38 @@ class UpdatesRepository {
   final GraphQLClient client;
   final GraphQLClient subscriptionClient;
 
+  /// Count unread chapters in the Updates feed without fetching chapter rows.
+  Future<int?> getUnreadUpdateChapterCount() async {
+    final result = await client.query(
+      QueryOptions(
+        operationName: 'GetChapterWithMangaPageUnreadCount',
+        document: gql(
+          r'''
+query GetChapterWithMangaPageUnreadCount($filter: ChapterFilterInput) {
+  chapters(filter: $filter, first: 0) {
+    totalCount
+  }
+}
+''',
+        ),
+        variables: {
+          'filter': updatesFilterInput(
+            (
+              downloaded: null,
+              unread: true,
+              started: null,
+              bookmarked: null,
+            ),
+          ).toJson(),
+        },
+        fetchPolicy: FetchPolicy.noCache,
+      ),
+    );
+    if (result.hasException) return null;
+    final chapters = result.data?['chapters'];
+    final totalCount = chapters is Map ? chapters['totalCount'] : null;
+    return totalCount is int ? totalCount : null;
+  }
 
   /// Fetch one extra row to detect another page without the server cost of COUNT/pageInfo.
   Future<UpdatesPage?> getRecentChaptersPage({

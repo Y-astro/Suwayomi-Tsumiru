@@ -9,19 +9,39 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../constants/navigation_bar_data.dart';
 import '../../features/library/presentation/library/controller/library_manga_list.dart';
+import '../../features/manga_book/data/updates/updates_repository.dart';
+import '../../features/offline/data/server_reachability.dart';
 
-typedef NavCounts = ({int library, int updates});
+typedef NavCounts = ({int library, int? updates});
+
+final updatesUnreadChapterCountProvider = FutureProvider.autoDispose<int?>((
+  ref,
+) async {
+  final library = ref.watch(
+    libraryMangaListProvider.select((state) => state.value),
+  );
+  if (library == null) return null;
+
+  final offline =
+      ref.watch(serverUnreachableProvider) || ref.watch(viewOfflineNowProvider);
+  if (offline) return null;
+
+  return ref.watch(updatesRepositoryProvider).getUnreadUpdateChapterCount();
+});
 
 final navCountsProvider = Provider.autoDispose<NavCounts?>((ref) {
   final library = ref.watch(libraryMangaListProvider).value;
   if (library == null) return null;
 
+  final offline =
+      ref.watch(serverUnreachableProvider) || ref.watch(viewOfflineNowProvider);
+  final updatesCount = offline
+      ? null
+      : ref.watch(updatesUnreadChapterCountProvider).value;
+
   return (
     library: {for (final manga in library) manga.id}.length,
-    updates: {
-      for (final manga in library)
-        if (manga.user.unreadCount > 0) manga.id,
-    }.length,
+    updates: updatesCount,
   );
 });
 
