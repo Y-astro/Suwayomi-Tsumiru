@@ -28,9 +28,9 @@ unless explicitly requested. Push completed, verified changes to the user's fork
    and [server packaging](../tool/server/bounded_logging/README.md).
 4. **Counts beside category and navigation labels — completed.** Category labels
    show the number of displayed titles by default and keep the existing display
-   toggle. Library counts distinct library titles. Updates counts all unread chapters
-   in the feed and refreshes after confirmed read changes
-   and library updates. History has no count.
+   toggle. Library counts distinct library titles. Updates counts distinct titles with
+   unread chapters across the entire feed. It refreshes after confirmed read
+   changes and library updates. History has no count.
 5. **Disable upstream Tsumiru update checks and notifications — queued.** This
    fork is personal; future upstream features will be imported deliberately.
 

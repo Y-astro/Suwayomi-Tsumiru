@@ -181,25 +181,25 @@ void main() {
   );
 
   test(
-    'confirmed read changes refresh the count once for a burst of writes',
+    'finishing a title refreshes the unread title count once for a burst of writes',
     () async {
       final counted = Completer<NavCounts>();
       container.listen(navCountsProvider, (_, next) {
-        if (next != null && next.updates == 1) counted.complete(next);
+        if (next != null && next.updates == 0) counted.complete(next);
       });
       await library.entered.future;
       library.response.complete([_manga(unreadCount: 2)]);
       await container.read(libraryMangaListProvider.future);
-      expect(container.read(navCountsProvider), (library: 1, updates: 2));
+      expect(container.read(navCountsProvider), (library: 1, updates: 1));
 
-      library.nextResponse = Future.value([_manga(unreadCount: 1)]);
+      library.nextResponse = Future.value([_manga(unreadCount: 0)]);
       final revision = container.read(updatesReadRevisionProvider.notifier);
       revision.bump();
       revision.bump();
 
       expect(await counted.future.timeout(const Duration(seconds: 3)), (
         library: 1,
-        updates: 1,
+        updates: 0,
       ));
       expect(library.requests, 2);
     },

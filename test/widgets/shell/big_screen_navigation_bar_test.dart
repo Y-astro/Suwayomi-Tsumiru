@@ -115,7 +115,7 @@ MangaDto _manga(int id, int unreadCount) => Fragment$MangaDto(
 );
 
 void main() {
-  testWidgets('sidebar counts library titles and unread chapters independently', (
+  testWidgets('sidebar counts each title with unread updates once', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues(const {});
@@ -124,12 +124,17 @@ void main() {
     await _pump(tester, prefs, library: () => library);
     final l10n = _l10n(tester);
     expect(find.text('${l10n.library} (3)'), findsOneWidget);
-    expect(find.text('${l10n.updates} (6)'), findsOneWidget);
+    expect(find.text('${l10n.updates} (2)'), findsOneWidget);
     expect(find.text(l10n.history), findsOneWidget);
 
     final container = ProviderScope.containerOf(
       tester.element(find.byType(DesktopSidebar)),
     );
+    library = [_manga(1, 4), _manga(2, 1), _manga(3, 0)];
+    container.invalidate(libraryMangaListProvider);
+    await tester.pumpAndSettle();
+    expect(find.text('${l10n.updates} (2)'), findsOneWidget);
+
     library = [_manga(1, 0), _manga(2, 0), _manga(3, 0)];
     container.invalidate(libraryMangaListProvider);
     await tester.pumpAndSettle();

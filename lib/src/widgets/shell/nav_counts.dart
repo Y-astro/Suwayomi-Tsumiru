@@ -16,12 +16,13 @@ final navCountsProvider = Provider.autoDispose<NavCounts?>((ref) {
   final library = ref.watch(libraryMangaListProvider).value;
   if (library == null) return null;
 
-  final titleIds = <int>{};
-  var unreadChapters = 0;
-  for (final manga in library) {
-    if (titleIds.add(manga.id)) unreadChapters += manga.user.unreadCount;
-  }
-  return (library: titleIds.length, updates: unreadChapters);
+  return (
+    library: {for (final manga in library) manga.id}.length,
+    updates: {
+      for (final manga in library)
+        if (manga.user.unreadCount > 0) manga.id,
+    }.length,
+  );
 });
 
 String countedNavLabel(
