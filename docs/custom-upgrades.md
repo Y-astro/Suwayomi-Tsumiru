@@ -10,7 +10,7 @@ unless explicitly requested. Push completed, verified changes to the user's fork
    Follow-up: optimize cached-cover rendering, match main mouse-wheel distance
    to the reader default, and disable desktop pull-to-refresh while retaining
    explicit update controls.
-2. **Library update errors and bounded retries — implemented, release review pending.** Correct stale error
+2. **Library update errors and bounded retries — deployed, fork push pending.** Correct stale error
    markers after a successful title refresh and synchronization with the latest
    chapters. Retry error-marked titles at one hour and two hours after the main
    library update finishes, then stop automatic retries for that update cycle.
@@ -26,5 +26,6 @@ unless explicitly requested. Push completed, verified changes to the user's fork
    fork is personal; future upstream features will be imported deliberately.
 
 The initial native high-refresh optimization and launcher replacement are done.
-Item 2 has passed client, backend, and packaged-runtime tests; activation and
-delivery remain pending. Items 3–5 remain queued.
+Item 2 has passed client, backend, and packaged-runtime tests. The existing custom
+v2.4.2366 server is patched without an upstream upgrade, and the application
+launcher uses the verified build. Fork delivery remains pending. Items 3–5 remain queued.
