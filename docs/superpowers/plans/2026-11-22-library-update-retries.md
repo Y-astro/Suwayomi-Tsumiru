@@ -27,7 +27,7 @@ binaries in git. Work only on backlog item 2. Main completion anchors both hours
 - [x] Package a pinned reproducible backend patch and review the complete diff.
 - [x] Back up/stage server, deploy only when idle, and verify detached API health.
 - [x] Install verified app build and update backlog.
-- [ ] Push verified changes to the fork without a PR.
+- [x] Push verified changes to the fork without a PR.
 
 ## Verification ledger
 
