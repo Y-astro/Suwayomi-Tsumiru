@@ -26,7 +26,7 @@ Do not substitute a fresh upstream JAR for the customized base.
 
 `mobile-server-logging.patch` contains the maintained operations changes from
 base `af7b665a9cf58f00df6d3493524988eae0b36120`, committed separately as
-`99ac7f6311a0583d78d012e50493beb3cec6308c`. Apply it in an isolated checkout of the
+`cb6253655ab15db20a2665c34a1c6ba9d0002b1c`. Apply it in an isolated checkout of the
 mobile-server repository. Its documentation and tests cover the shared 20 MB
 ring, private locking for Android shared storage, bounded capture, exact legacy
 migration, and the service-scoped release profile.

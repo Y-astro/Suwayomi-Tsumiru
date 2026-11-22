@@ -723,18 +723,19 @@ index 2a331cc..9c1ea50 100755
          LOG_DIR.mkdir(parents=True, exist_ok=True)
          with LOG_FILE.open("a", encoding="utf-8") as f:
 diff --git a/scripts/suwayomi_graphql_filter.py b/scripts/suwayomi_graphql_filter.py
-index 088e9e9..97ddd36 100755
+index 088e9e9..bbd345a 100755
 --- a/scripts/suwayomi_graphql_filter.py
 +++ b/scripts/suwayomi_graphql_filter.py
-@@ -13,6 +13,7 @@ import json
+@@ -13,6 +13,8 @@ import json
  import logging
  from logging.handlers import RotatingFileHandler
  import os
 +import re
++import sys
  from pathlib import Path
  import threading
  import time
-@@ -53,6 +54,14 @@ logger.addHandler(logging.NullHandler())
+@@ -53,6 +55,14 @@ logger.addHandler(logging.NullHandler())
  
  
  def setup_logging():
@@ -749,7 +750,7 @@ index 088e9e9..97ddd36 100755
      LOG_DIR.mkdir(parents=True, exist_ok=True)
      handler = RotatingFileHandler(LOG_DIR / "graphql_filter.log", maxBytes=1024 * 1024, backupCount=2)
      handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-@@ -345,6 +354,23 @@ class FilterHandler(http.server.BaseHTTPRequestHandler):
+@@ -345,6 +355,23 @@ class FilterHandler(http.server.BaseHTTPRequestHandler):
      upstream = UPSTREAM
      cache = cache
  
@@ -773,7 +774,7 @@ index 088e9e9..97ddd36 100755
      def log_message(self, format, *args):
          pass  # Quiet logging for performance
  
-@@ -419,6 +445,15 @@ class FilterHandler(http.server.BaseHTTPRequestHandler):
+@@ -419,6 +446,15 @@ class FilterHandler(http.server.BaseHTTPRequestHandler):
  
          body = self.rfile.read(content_len) if content_len > 0 else b""
  
@@ -881,10 +882,10 @@ index 0000000..a1a3c1c
 +                    except ProcessLookupError: pass
 diff --git a/tests/test_suwayomi_logging_acceptance.py b/tests/test_suwayomi_logging_acceptance.py
 new file mode 100644
-index 0000000..c1df1c7
+index 0000000..38c346e
 --- /dev/null
 +++ b/tests/test_suwayomi_logging_acceptance.py
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,157 @@
 +import os
 +from pathlib import Path
 +import subprocess
@@ -1027,6 +1028,21 @@ index 0000000..c1df1c7
 +        self.assertEqual(jar.read_bytes(), before)
 +        self.assertFalse((live / 'home/.local/lib/mobile-server/suwayomi_logs.py').exists())
 +        self.assertEqual(release.recover(transaction, live, driver=driver)['state'], release.STATE_ROLLED_BACK)
++
++class BoundedFilterStartupTests(unittest.TestCase):
++    def test_actual_capture_logging_setup_has_no_file_handler(self):
++        import importlib.util
++        path = Path(__file__).parents[1] / 'scripts/suwayomi_graphql_filter.py'
++        spec = importlib.util.spec_from_file_location('bounded_filter_startup', path)
++        module = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(module)
++        with patch.dict(os.environ, {'SUWAYOMI_BOUNDED_LOGGING': '1'}):
++            module.setup_logging()
++        from logging.handlers import RotatingFileHandler
++        self.assertFalse(any(isinstance(handler, RotatingFileHandler) for handler in module.logger.handlers))
++        for handler in module.logger.handlers[:]:
++            if not isinstance(handler, __import__('logging').NullHandler):
++                module.logger.removeHandler(handler)
 diff --git a/tests/test_suwayomi_logs.py b/tests/test_suwayomi_logs.py
 new file mode 100644
 index 0000000..0fad0da
