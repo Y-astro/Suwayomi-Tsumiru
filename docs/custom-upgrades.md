@@ -17,10 +17,15 @@ unless explicitly requested. Push completed, verified changes to the user's fork
    Updates follow-up: confirmed read/unread writes refresh its cached cards and
    chapter badges, including saves finishing after reader exit. Unread-only
    filtering removes fully read entries and supports an empty result.
-3. **Detailed bounded logs — queued.** Add detailed server and app diagnostics
-   with a 20 MB size limit. Confirm the exact retention/size policy when this
-   item starts. The user authorized server access through ADB on the Redmi K20
-   Pro or their supplied SSH connection; connection details stay out of git.
+3. **Detailed bounded logs — completed.** Each application retains at most
+   20,000,000 bytes across active and rotated logs. Laptop logs use the repository
+   `logs/` folder; phone logs use `/storage/emulated/0/Suwayomi/logs`.
+   Release activity includes API metadata/timings, lifecycle/navigation, settings
+   keys, downloads, updates, and errors, with credential redaction. App writes
+   are asynchronous; copy/clear serialize with pending writes. The custom server
+   stays on v2.4.2366. Controlled migration removes duplicate legacy logs and
+   preserves unrelated services and disabled flags. See [logging](logging.md)
+   and [server packaging](../tool/server/bounded_logging/README.md).
 4. **Counts beside category and navigation labels — queued.** Show title counts
    beside library category names, such as `Reading (12)`, and show counts beside
    `Library` and `Updates` in navigation. Skip History. Resolve the meaning of
@@ -31,4 +36,5 @@ unless explicitly requested. Push completed, verified changes to the user's fork
 The initial native high-refresh optimization and launcher replacement are done.
 Item 2 has passed client, backend, and packaged-runtime tests. The existing custom
 v2.4.2366 server is patched without an upstream upgrade, and the application
-launcher uses the verified build. Verified changes are pushed to the fork. Items 3–5 remain queued.
+launcher uses the verified build. Item 3 is complete; items 4–5 remain queued. Push completed, verified changes
+to the fork without creating a PR.
