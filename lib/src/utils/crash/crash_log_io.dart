@@ -69,10 +69,11 @@ Future<void> flushCrashLog(String? path) async {
 }
 
 class _Operation {
-  _Operation(this.run, this.drop, this.bytes);
+  _Operation(this.run, this.finish, this.bytes, this.content);
   final Future<void> Function() run;
-  final void Function() drop;
+  final void Function() finish;
   final int bytes;
+  final String? content;
 }
 
 class _LogQueue {
@@ -88,19 +89,28 @@ class _LogQueue {
         ? '${content.substring(0, 65536)} [truncated]'
         : content;
     final safe = redactTokens(bounded);
-    final size = utf8.encode(safe).length;
+    final record = safe.endsWith('\n') ? safe : '$safe\n';
+    final size = utf8.encode(record).length;
     while (_bytes + size > _queueBytes) {
       final oldest = _pending.where((op) => op.bytes > 0).firstOrNull;
       if (oldest == null) break;
       _pending.remove(oldest);
       _bytes -= oldest.bytes;
       _dropped++;
-      oldest.drop();
+      oldest.finish();
     }
-    return enqueue(() => store.append(safe), bytes: size).then((_) {});
+    return enqueue(
+      () => store.append(record),
+      bytes: size,
+      content: record,
+    ).then((_) {});
   }
 
-  Future<T?> enqueue<T>(Future<T> Function() action, {int bytes = 0}) {
+  Future<T?> enqueue<T>(
+    Future<T> Function() action, {
+    int bytes = 0,
+    String? content,
+  }) {
     final done = Completer<T?>();
     _pending.add(
       _Operation(
@@ -114,6 +124,7 @@ class _LogQueue {
         },
         () => done.complete(null),
         bytes,
+        content,
       ),
     );
     _bytes += bytes;
@@ -135,7 +146,32 @@ class _LogQueue {
           );
         } catch (_) {}
       }
-      await operation.run();
+      final content = operation.content;
+      if (content == null || operation.bytes > 65536) {
+        await operation.run();
+        continue;
+      }
+      // Share one locked append without crossing read/clear/flush barriers or truncating records.
+      final batch = [operation];
+      final records = StringBuffer(content);
+      var bytes = operation.bytes;
+      while (_pending.isNotEmpty) {
+        final next = _pending.first;
+        if (next.content == null || bytes + next.bytes > 65536) break;
+        _pending.removeFirst();
+        _bytes -= next.bytes;
+        bytes += next.bytes;
+        batch.add(next);
+        records.write(next.content);
+      }
+      try {
+        await store.append(records.toString());
+      } catch (_) {
+        // Keep the same best-effort completion as individual writes.
+      }
+      for (final entry in batch) {
+        entry.finish();
+      }
     }
     _draining = false;
   }

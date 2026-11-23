@@ -8,6 +8,7 @@
 
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -67,21 +68,27 @@ mixin SharedPreferenceClientMixin<T extends Object> {
   void _persistenceRefreshLogic() => listenSelf((_, next) => _set(next));
 
   Future<bool> _set(T? value) async {
-    recordDiagnostic('[${DateTime.now().toIso8601String()}] settings key=$_key action=${value == null ? 'remove' : 'write'}\n');
-    if (value == null) return _client.remove(_key);
-    if (_toJson != null) {
-      _client.setString(_key, jsonEncode(_toJson(value)));
+    final stored = value != null && _toJson != null
+        ? jsonEncode(_toJson(value))
+        : value;
+    final previous = _client.get(_key);
+    // Auto-disposed providers can initialize once per manga during reconciliation.
+    if ((previous == stored && previous.runtimeType == stored.runtimeType) ||
+        (previous is List && stored is List && listEquals(previous, stored))) {
+      return true;
     }
-    if (value is bool) {
-      return await _client.setBool(_key, value);
-    } else if (value is double) {
-      return await _client.setDouble(_key, value);
-    } else if (value is int) {
-      return await _client.setInt(_key, value);
-    } else if (value is String) {
-      return await _client.setString(_key, value);
-    } else if (value is List<String>) {
-      return await _client.setStringList(_key, value);
+    recordDiagnostic('[${DateTime.now().toIso8601String()}] settings key=$_key action=${value == null ? 'remove' : 'write'}\n');
+    if (stored == null) return _client.remove(_key);
+    if (stored is bool) {
+      return await _client.setBool(_key, stored);
+    } else if (stored is double) {
+      return await _client.setDouble(_key, stored);
+    } else if (stored is int) {
+      return await _client.setInt(_key, stored);
+    } else if (stored is String) {
+      return await _client.setString(_key, stored);
+    } else if (stored is List<String>) {
+      return await _client.setStringList(_key, stored);
     }
     return false;
   }
@@ -121,6 +128,7 @@ mixin SharedPreferenceEnumClientMixin<T extends Enum> {
   T? get _get => _getEnumFromIndex(_client.getInt(_key));
 
   Future<bool> _set(int? value) {
+    if (_client.get(_key) == value) return Future.value(true);
     recordDiagnostic('[${DateTime.now().toIso8601String()}] settings key=$_key action=${value == null ? 'remove' : 'write'}\n');
     if (value == null) return _client.remove(_key);
     return _client.setInt(_key, value);
