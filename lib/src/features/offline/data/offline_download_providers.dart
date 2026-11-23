@@ -815,7 +815,12 @@ Future<void> _resolveReadDeletes(
       );
       if (!current()) return;
       if (target != null) {
-        pending.enqueue((mangaId: mangaId, chapterId: target, server: true));
+        final listProvider = mangaChapterListProvider(mangaId: mangaId);
+        final chapters = read(listProvider).value ?? await read(listProvider.future);
+        if (!current()) return;
+        for (final id in expandIdsForDuplicates(chapters, [target])) {
+          pending.enqueue((mangaId: mangaId, chapterId: id, server: true));
+        }
       }
     }
   } catch (e) {
@@ -902,7 +907,7 @@ Future<void> maybeDeleteOnManualServer(
   );
 });
 
-// Use the unfiltered list and pending local bookmarks when deciding whether to delete.
+// Recheck server eligibility and pending local bookmarks before deleting.
 Future<void> _deleteServerCopyIfDeletable(
   ReadFn read,
   int mangaId,
@@ -910,16 +915,14 @@ Future<void> _deleteServerCopyIfDeletable(
   bool allowBookmarked,
 ) => _trackForegroundWrite(read, (current) async {
   try {
-    final listProvider = mangaChapterListProvider(mangaId: mangaId);
-    // At reader exit the chapter list may be refetching; await it before deciding.
-    final chapters =
-        read(listProvider).value ?? await read(listProvider.future);
-    if (!current()) return;
-    final idx = chapters?.indexWhere((e) => e.id == chapterId) ?? -1;
-    if (chapters == null || idx < 0) return;
-    final c = chapters[idx];
-    if (!c.user.isDownloaded) return;
-    var isBookmarked = c.user.isBookmarked;
+    final allowed = await read(deleteChaptersSettingsRepositoryProvider)
+        .canAutoDeleteServerChapter(
+          mangaId: mangaId,
+          chapterId: chapterId,
+          allowBookmarked: allowBookmarked,
+        );
+    if (!current() || !allowed) return;
+    var isBookmarked = false;
     if (read(offlineActiveProvider)) {
       final row = await read(offlineRepositoryProvider).chapterById(chapterId);
       if (!current()) return;

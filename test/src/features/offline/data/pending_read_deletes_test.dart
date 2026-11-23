@@ -46,7 +46,28 @@ class _FixedChapterList extends MangaChapterList {
   Future<List<ChapterDto>?> build({required int mangaId}) async => chapters;
 }
 
+class _EnabledServerDeletes extends DeleteChaptersSettingsController {
+  @override
+  Future<DeleteChaptersSettings> build() async =>
+      const DeleteChaptersSettings(deleteWhileReading: 1);
+}
+
 void main() {
+  testWidgets('server cleanup queues confident hidden scanlator copies', (
+    tester,
+  ) async {
+    final (ref, container) = await _pumpFinishHarness(
+      tester,
+      serverDuplicates: true,
+    );
+    await noteChapterFinishedInReader(ref, mangaId: 1, chapterId: 3);
+    final queued = container.read(pendingReadDeletesProvider);
+    expect(
+      queued.where((row) => row.server).map((row) => row.chapterId),
+      unorderedEquals([3, 33]),
+    );
+  });
+
   test('while-reading deletes queue up and drain once', () {
     final container = ProviderContainer();
     addTearDown(container.dispose);
@@ -91,12 +112,19 @@ void main() {
 /// Chapters 1..3 in reading order, delete-while-reading at 2 slots, offline
 /// active: finishing chapter 3 resolves a device delete for chapter 2.
 Future<(WidgetRef, ProviderContainer)> _pumpFinishHarness(
-  WidgetTester tester,
-) async {
+  WidgetTester tester, {
+  bool serverDuplicates = false,
+}) async {
   SharedPreferences.setMockInitialValues(const {});
   final prefs = await SharedPreferences.getInstance();
   final chapters = [
-    _ch(3, sourceOrder: 3),
+    _ch(3, sourceOrder: 3).copyWith(name: 'Chapter 3', scanlator: 'Alpha'),
+    if (serverDuplicates)
+      _ch(
+        33,
+        sourceOrder: 30,
+        isRead: true,
+      ).copyWith(chapterNumber: 3, name: 'Chapter 3', scanlator: 'Bravo'),
     _ch(2, sourceOrder: 2, isRead: true),
     _ch(1, sourceOrder: 1, isRead: true),
   ];
@@ -106,7 +134,11 @@ Future<(WidgetRef, ProviderContainer)> _pumpFinishHarness(
     ProviderScope(
       overrides: [
         sharedPreferencesProvider.overrideWithValue(prefs),
-        offlineActiveProvider.overrideWithValue(true),
+        offlineActiveProvider.overrideWithValue(!serverDuplicates),
+        if (serverDuplicates)
+          deleteChaptersSettingsControllerProvider.overrideWith(
+            _EnabledServerDeletes.new,
+          ),
         localDeleteSettingsProvider.overrideWithValue(
           const DeleteChaptersSettings(
             deleteWhileReading: 2,

@@ -63,6 +63,53 @@ class DeleteChaptersSettingsRepository {
       .query$GlobalMetas(Options$Query$GlobalMetas())
       .getData((data) => data.metas.nodes);
 
+  /// Recheck server state: cached reader rows can lag read/category/bookmark changes.
+  Future<bool> canAutoDeleteServerChapter({
+    required int mangaId,
+    required int chapterId,
+    required bool allowBookmarked,
+  }) async {
+    final result = await ferryClient.query(
+      QueryOptions(
+        document: gql(r'''
+query ServerReadDeleteEligibility($chapterId: Int!, $mangaId: Int!) {
+  chapter(id: $chapterId) { id mangaId user { isRead isDownloaded isBookmarked } }
+  manga(id: $mangaId) { categories { nodes { name } } }
+}
+'''),
+        variables: {'chapterId': chapterId, 'mangaId': mangaId},
+        fetchPolicy: FetchPolicy.noCache,
+      ),
+    );
+    if (result.hasException) return false;
+    final chapter = result.data?['chapter'];
+    final manga = result.data?['manga'];
+    if (chapter is! Map ||
+        manga is! Map ||
+        chapter['id'] != chapterId ||
+        chapter['mangaId'] != mangaId) {
+      return false;
+    }
+    final user = chapter['user'];
+    final categories = manga['categories'];
+    final nodes = categories is Map ? categories['nodes'] : null;
+    if (user is! Map ||
+        nodes is! List ||
+        nodes.any((row) => row is! Map || row['name'] is! String)) {
+      return false;
+    }
+    if (nodes.any(
+      (row) =>
+          (row['name'] as String).trim().toLowerCase() == 'currently reading',
+    )) {
+      return false;
+    }
+    return user['isRead'] == true &&
+        user['isDownloaded'] == true &&
+        user['isBookmarked'] is bool &&
+        (allowBookmarked || user['isBookmarked'] == false);
+  }
+
   Future<void> setRawGlobalMeta(String key, String value) async {
     await ferryClient
         .mutate$SetGlobalMeta(
