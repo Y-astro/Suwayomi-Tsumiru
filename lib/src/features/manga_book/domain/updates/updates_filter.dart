@@ -4,6 +4,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+import '../chapter/chapter_model.dart';
+
 /// Structural equality lets the screen detect filter changes between builds.
 typedef UpdatesFilter = ({
   bool? downloaded,
@@ -18,3 +20,14 @@ const UpdatesFilter kNoUpdatesFilter = (
   started: null,
   bookmarked: null,
 );
+
+/// Retained read rows stay visible but no longer occupy the filtered server page.
+bool matchesUpdatesFilter(ChapterDto chapter, UpdatesFilter filter) {
+  final user = chapter.user;
+  return (filter.downloaded == null ||
+          user.isDownloaded == filter.downloaded) &&
+      (filter.unread == null || user.isRead != filter.unread) &&
+      (filter.bookmarked == null || user.isBookmarked == filter.bookmarked) &&
+      (filter.started == null ||
+          (!user.isRead && (user.lastPageRead > 0) == filter.started));
+}

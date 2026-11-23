@@ -21,18 +21,22 @@ import './graphql/__generated__/query.graphql.dart';
 part 'updates_repository.g.dart';
 
 /// Updates keeps its own paging state, outside the chapter and library providers.
-final updatesReadRevisionProvider = NotifierProvider<UpdatesReadRevision, int>(
-  UpdatesReadRevision.new,
-);
+final updatesReadRevisionProvider = NotifierProvider<
+  UpdatesReadRevision,
+  ({int revision, List<ChapterDto> chapters})
+>(UpdatesReadRevision.new);
 
-class UpdatesReadRevision extends Notifier<int> {
+class UpdatesReadRevision
+    extends Notifier<({int revision, List<ChapterDto> chapters})> {
   @override
-  int build() => 0;
+  ({int revision, List<ChapterDto> chapters}) build() =>
+      (revision: 0, chapters: const []);
 
-  void bump() => state++;
+  void bump([List<ChapterDto> chapters = const []]) =>
+      state = (revision: state.revision + 1, chapters: chapters);
 }
 
-/// Pagination offsets must advance by this size to avoid overlapping pages.
+/// Maximum chapter rows per page; retained filtered rows do not advance offsets.
 const int updatesPageSize = 50;
 
 /// At most [updatesPageSize] chapters, newest first, with a flag for another page.
@@ -113,13 +117,16 @@ query GetChapterWithMangaPageUnreadCount($filter: ChapterFilterInput) {
   Future<UpdatesPage?> getRecentChaptersPage({
     int pageNo = 0,
     UpdatesFilter filter = kNoUpdatesFilter,
+    int? offset,
   }) async {
-    final page = await _getRecentChaptersWindow(pageNo, filter);
+    final page = await _getRecentChaptersWindow(
+      offset ?? pageNo * updatesPageSize, filter,
+    );
     return page == null ? null : splitPageWindow(page.nodes, updatesPageSize);
   }
 
   Future<ChapterPageWithMangaDto?> _getRecentChaptersWindow(
-    int pageNo,
+    int offset,
     UpdatesFilter filter,
   ) =>
       client
@@ -128,7 +135,7 @@ query GetChapterWithMangaPageUnreadCount($filter: ChapterFilterInput) {
               variables: Variables$Query$GetChapterWithMangaPage(
                 filter: updatesFilterInput(filter),
                 first: updatesPageSize + 1,
-                offset: pageNo * updatesPageSize,
+                offset: offset,
                 order: [
                   Input$ChapterOrderInput(
                     by: Enum$ChapterOrderBy.FETCHED_AT,

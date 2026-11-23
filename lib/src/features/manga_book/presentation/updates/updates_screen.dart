@@ -312,7 +312,6 @@ class _UpdatesPagedListState extends State<_UpdatesPagedList> {
     List<ChapterWithMangaDto> items,
   ) => UpdatesGridCard(
       group: group,
-      refreshManga: () => _refreshManga(group.head.mangaId),
       refreshRowActions: (mangaIds) =>
           _refreshMangas(mangaIds, freshWins: true),
       isSelectedFor: (chapter) =>
@@ -575,11 +574,13 @@ class UpdatesScreen extends HookConsumerWidget {
   Future<ServerPage<ChapterWithMangaDto>> _fetchPage(
     UpdatesRepository repository,
     int pageKey,
-    UpdatesFilter filter,
-  ) async {
+    UpdatesFilter filter, {
+    required int offset,
+  }) async {
     final page = await repository.getRecentChaptersPage(
       pageNo: pageKey,
       filter: filter,
+      offset: offset,
     );
     if (page == null) {
       return (items: <ChapterWithMangaDto>[], hasNextPage: false);
@@ -617,13 +618,18 @@ class UpdatesScreen extends HookConsumerWidget {
     // The fetcher is captured once; read current filters through a holder to avoid stale closures.
     final latestFilter = useRef(filter);
     latestFilter.value = filter;
-    final controller = useServerPagingController<ChapterWithMangaDto>(
+    late final ServerPagingController<ChapterWithMangaDto> controller;
+    controller = useServerPagingController<ChapterWithMangaDto>(
       firstPageKey: 0,
       // Read the repository per request because endpoint switches dispose the captured client.
       fetchPage: (pageKey) => _fetchPage(
         ref.read(updatesRepositoryProvider),
         pageKey,
         latestFilter.value,
+        offset: controller.items
+                ?.where((row) => matchesUpdatesFilter(row, latestFilter.value))
+                .length ??
+            0,
       ),
     );
     // List resets invalidate replies from earlier generations.
@@ -634,8 +640,20 @@ class UpdatesScreen extends HookConsumerWidget {
       selectionAnchor.value = null;
       controller.refresh();
     }, []);
-    // Pop can finish before the reader's final write; refresh after the server confirms it.
-    ref.listen(updatesReadRevisionProvider, (_, _) => resetList());
+    // Keep listening under the reader route; widget subscriptions can pause there.
+    final container = ProviderScope.containerOf(context, listen: false);
+    useEffect(() {
+      final subscription = container.listen(updatesReadRevisionProvider, (_, next) {
+        final chapters = {for (final chapter in next.chapters) chapter.id: chapter};
+        controller.mapItems((row) {
+          final read = chapters[row.id]?.user.isRead;
+          return read == null || read == row.user.isRead
+              ? row
+              : row.copyWith(user: row.user.copyWith(isRead: read));
+        });
+      });
+      return subscription.close;
+    }, [container, controller]);
     // Custom covers arrive through meta the cached rows were fetched without.
     final coverRevision = ref.watch(customCoverRevisionProvider);
     final isCoverRevisionMount = useRef(true);
