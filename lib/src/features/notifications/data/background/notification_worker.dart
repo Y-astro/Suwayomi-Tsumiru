@@ -130,9 +130,6 @@ Future<bool> runNewChapterCheck() async {
         ) &&
         ok;
   }
-  if (notificationPolicy && config.appUpdatesEnabled) {
-    await _checkAppUpdate(store, config, client, notifier, l10n);
-  }
   if (notificationPolicy && config.extensionUpdatesEnabled) {
     await _checkExtensionUpdates(store, config, client, notifier, l10n);
   }
@@ -141,27 +138,6 @@ Future<bool> runNewChapterCheck() async {
     'check-finished ok=$ok\n',
   );
   return ok;
-}
-
-Future<void> _checkAppUpdate(
-  NotificationStateStore store,
-  NotificationWorkerConfig config,
-  NotificationBackgroundClient client,
-  LocalNotificationService notifier,
-  AppLocalizations l10n,
-) async {
-  final release = await client.fetchLatestRelease();
-  if (release == null) return;
-  if (release.version == config.appVersion) return; // up to date
-  await _withNotificationOwner(config, (current) async {
-    if (release.version == current.lastNotifiedAppVersion) return;
-    await current.setLastNotifiedAppVersion(release.version);
-    await notifier.showAppUpdate(
-      l10n.notificationAppUpdateTitle,
-      l10n.notificationAppUpdateBody(release.version),
-      release.url.isEmpty ? null : release.url,
-    );
-  });
 }
 
 Future<void> _checkExtensionUpdates(

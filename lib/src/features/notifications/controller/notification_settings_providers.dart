@@ -6,7 +6,6 @@
 
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
-import '../../../constants/app_distribution.dart';
 import '../../../constants/db_keys.dart';
 import '../../../utils/mixin/shared_preferences_client_mixin.dart';
 
@@ -72,19 +71,13 @@ class NotificationsCategoriesExclude extends _$NotificationsCategoriesExclude
 class NotificationsAppUpdatesEnabled extends _$NotificationsAppUpdatesEnabled
     with SharedPreferenceClientMixin<bool> {
   @override
-  bool? build() => isGooglePlayBuild
-      ? false
-      : initialize(DBKeys.notificationsAppUpdatesEnabled);
+  bool? build() => false;
 
   @override
-  void update(bool? value) {
-    if (!isGooglePlayBuild) super.update(value);
-  }
+  void update(bool? value) {}
 
   @override
-  void updateWithPreviousState(bool? Function(bool?) operation) {
-    if (!isGooglePlayBuild) super.updateWithPreviousState(operation);
-  }
+  void updateWithPreviousState(bool? Function(bool?) operation) {}
 }
 
 @riverpod

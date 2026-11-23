@@ -11,11 +11,9 @@ import 'package:material_ui/material_ui.dart';
 import 'package:pub_semver/pub_semver.dart';
 
 import '../../../../constants/app_constants.dart';
-import '../../../../constants/app_distribution.dart';
 import '../../../../constants/app_sizes.dart';
 import '../../../../constants/brand_icons.dart';
 import '../../../../constants/urls.dart';
-import '../../../../routes/router_config.dart';
 import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../utils/launch_url_in_web.dart';
 import '../../../../utils/misc/toast/toast.dart';
@@ -91,37 +89,6 @@ class AboutScreen extends HookConsumerWidget {
     });
   }
 
-  Future<void> checkForUpdate({
-    required String? title,
-    required BuildContext context,
-    required Future<AsyncValue<Version?>> Function() updateCallback,
-    required Toast? toast,
-  }) async {
-    toast?.show(context.l10n.searchingForUpdates);
-    final result = await updateCallback();
-    if (!context.mounted) return;
-    toast?.close();
-    result.whenOrNull(
-      data: (version) {
-        if (version != null) {
-          appUpdateDialog(
-            title: title ?? kAppName,
-            newRelease: "v${version.canonicalizedVersion}",
-            context: context,
-            toast: toast,
-          );
-        } else {
-          toast?.show(context.l10n.noUpdatesAvailable);
-        }
-      },
-      error: (error, stackTrace) {
-        if (toast != null) {
-          result.showToastOnError(toast);
-        }
-      },
-    );
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final toast = ref.watch(toastProvider);
@@ -131,7 +98,6 @@ class AboutScreen extends HookConsumerWidget {
     // Server version already includes revision as its patch number.
     final serverVer = about?.version;
     final packageInfo = ref.watch(packageInfoProvider);
-    final serverHosted = ref.watch(serverHostedWebProvider);
 
     useEffect(() {
       if (toast != null) {
@@ -220,24 +186,6 @@ class AboutScreen extends HookConsumerWidget {
                           );
                         },
                       ),
-                      if (!isGooglePlayBuild)
-                        ListTile(
-                          title: Text(
-                            serverHosted
-                                ? context.l10n.updatedByYourServer
-                                : context.l10n.checkForUpdates,
-                          ),
-                          onTap: serverHosted
-                              ? () => const ServerSettingsRoute().push(context)
-                              : () => checkForUpdate(
-                                  title: packageInfo.appName,
-                                  context: context,
-                                  updateCallback: ref
-                                      .read(aboutRepositoryProvider)
-                                      .checkUpdate,
-                                  toast: toast,
-                                ),
-                        ),
                       ListTile(
                         title: Text(context.l10n.privacyPolicy),
                         onTap: () => launchUrlInWeb(

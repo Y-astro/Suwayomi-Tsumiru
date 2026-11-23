@@ -4,16 +4,15 @@ Smaller features: about, history, migration, offline, quick_open.
 
 ## about
 
-App/server version info + update checks.
+App/server version info and server update checks.
 
-- `data/about_repository.dart` — **two update paths**: `checkUpdate()` hits the **GitHub Releases REST API** directly in ordinary native/standalone builds; `checkServerUpdate()` uses the server's GraphQL `checkForServerUpdates`. Both use `pub_semver`.
-- `controllers/about_controller.dart` — `aboutProvider` (GraphQL `GetAbout`); `packageInfoProvider` is `throw UnimplementedError()` (overridden in `main.dart`).
-- URLs (all in `lib/src/constants/urls.dart`): `githubUrl` = `github.com/Suwayomi/Suwayomi-Tsumiru`, `latestReleaseUrl`/`...ApiUrl` (releases + GitHub API), `whatsNew` = GitHub releases page, `tachideskHelp` = `tsumiru.app/docs/...`.
-- Release checks accept version tags with or without a leading `v`, then compare versions with `pub_semver`.
-- About includes a localized Privacy policy row linking to `https://tsumiru.app/privacy/` in every distribution.
-- With `--dart-define=TSUMIRU_GOOGLE_PLAY=true`, `isGooglePlayBuild` disables app-version HTTP requests in both `AboutRepository` and `NotificationBackgroundClient`. The shell skips app-update startup work, and the shared dialog suppresses app prompts. Server dialogs use an explicit `isServerUpdate` flag, including when their release URL is absent.
-- Play builds hide the client update row, app-update notification toggle and its settings-search entry. The settings provider ignores stored app-update preferences without overwriting them. `NotificationWorkerConfig.appUpdatesEnabled` is effectively false even for directly constructed or stale JSON configurations, so app-only checks cannot schedule a worker. Server, extension and chapter checks retain their normal behavior. What's New and project/help links remain available.
-- Server-hosted web builds continue to use server-managed web updates. See [repo-build-release.md](repo-build-release.md#google-play-distribution-mode) for build and test commands.
+- `data/about_repository.dart` — `checkServerUpdate()` uses the server's GraphQL `checkForServerUpdates`. `checkUpdate()` remains a compatibility no-op with no HTTP request.
+- `controllers/about_controller.dart` — `aboutProvider` (GraphQL `GetAbout`); `packageInfoProvider` is overridden in `main.dart`.
+- This personal fork disables upstream Tsumiru update scans and prompts in every distribution. Startup and About no longer offer app checks. Background workers never fetch app releases or post app-update notifications.
+- The app-update notification toggle and settings-search entry are removed. Legacy stored preferences remain untouched but cannot enable checks. Direct or stale JSON `NotificationWorkerConfig` values also resolve app updates to false, so app-only configurations cannot schedule a worker.
+- Server, extension, chapter and download notifications retain their existing behavior. Server dialogs still require an explicit `isServerUpdate` flag.
+- Installed version information, What's New, project/help links and Privacy policy remain available. Server-hosted revision reload banners and server-managed WebUI controls remain available; the shell no longer checks upstream Tsumiru WebUI releases.
+- Distribution mode still uses `--dart-define=TSUMIRU_GOOGLE_PLAY=true`; see [repo-build-release.md](repo-build-release.md#google-play-distribution-mode) for commands.
 
 ## history
 

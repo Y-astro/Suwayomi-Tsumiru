@@ -13,7 +13,7 @@ App bootstrap, the `go_router` typed route tree, and the stateful navigation she
 | `lib/src/routes/router_config.dart` | `@riverpod routerConfig` `GoRouter`; typed `ShellRoute`/`GoRoute` defs; `Routes` constants; navigator keys |
 | `lib/src/routes/router_config.g.dart` | Generated `$appRoutes` (build_runner) |
 | `lib/src/routes/sub_routes/*.dart` | `part` files, one per nav section |
-| `lib/src/widgets/shell/navigation_shell_screen.dart` | `NavigationShellScreen` — dispatches to big/small nav bar; runs update check on first mount |
+| `lib/src/widgets/shell/navigation_shell_screen.dart` | `NavigationShellScreen` — dispatches to big/small nav bar; starts server update alerts and hosted-build reload detection |
 | `lib/src/widgets/shell/big_screen_navigation_bar.dart` | `BigScreenNavigationBar` — `NavigationRail` (extended on desktop, logo in leading) |
 | `lib/src/widgets/shell/small_screen_navigation_bar.dart` | `SmallScreenNavigationBar` — M3 bottom `NavigationBar` |
 | `lib/src/constants/navigation_bar_data.dart` | `NavigationBarData` — `phoneNavList`/`tabletNavList`, `getNavList(context)` |

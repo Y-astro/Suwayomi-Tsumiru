@@ -4,12 +4,9 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-import 'dart:convert';
-
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
 
-import '../../../../constants/app_distribution.dart';
 import '../../../../constants/endpoints.dart';
 import '../../../../utils/crash/diagnostics.dart';
 import '../../../account/data/account_permission.dart';
@@ -383,23 +380,6 @@ mutation NotifEnqueue($ids: [Int!]!) {
         0;
   }
 
-  /// Public GitHub release version and page; null on failure.
-  Future<({String version, String url})?> fetchLatestRelease() async {
-    if (isGooglePlayBuild) return null;
-    try {
-      final res = await _http.get(
-        Uri.parse(
-          'https://api.github.com/repos/Suwayomi/Suwayomi-Tsumiru/releases/latest',
-        ),
-        headers: const {'Accept': 'application/vnd.github+json'},
-      );
-      if (res.statusCode != 200) return null;
-      final j = jsonDecode(res.body) as Map<String, Object?>;
-      final tag = (j['tag_name'] as String?)?.replaceFirst('v', '');
-      if (tag == null || tag.isEmpty) return null;
-      return (version: tag, url: (j['html_url'] as String?) ?? '');
-    } catch (_) {
-      return null;
-    }
-  }
+  // Compatibility entry point: upstream app updates are disabled.
+  Future<({String version, String url})?> fetchLatestRelease() async => null;
 }

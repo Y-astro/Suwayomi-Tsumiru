@@ -8,7 +8,6 @@ import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
-import '../../../../constants/app_distribution.dart';
 import '../../../../utils/extensions/custom_extensions.dart';
 import '../../../../widgets/compact_switch.dart';
 import '../../../../widgets/desktop/desktop_top_bar.dart';
@@ -164,26 +163,6 @@ class NotificationsSettingsScreen extends HookConsumerWidget {
                         },
                       ),
                     ),
-                    if (!isGooglePlayBuild)
-                      SettingsHighlightTarget(
-                        id: 'notificationsAppUpdates',
-                        child: CompactSwitchListTile(
-                          title: Text(l10n.notificationsAppUpdates),
-                          value: ref
-                              .watch(notificationsAppUpdatesEnabledProvider)
-                              .ifNull(),
-                          onChanged: (v) async {
-                            ref
-                                .read(
-                                  notificationsAppUpdatesEnabledProvider
-                                      .notifier,
-                                )
-                                .update(v);
-                            if (v) await controller.requestPermissionAndSync();
-                            await reconcile();
-                          },
-                        ),
-                      ),
                     SettingsHighlightTarget(
                       id: 'notificationsExtensionUpdates',
                       child: CompactSwitchListTile(

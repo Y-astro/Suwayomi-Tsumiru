@@ -4,20 +4,15 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-import 'dart:convert';
-
 import 'package:flutter/foundation.dart';
 import 'package:graphql/client.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:pub_semver/pub_semver.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
-import '../../../constants/app_distribution.dart';
 import '../../../constants/db_keys.dart';
 import '../../../constants/endpoints.dart';
-import '../../../constants/urls.dart';
 import '../../../global_providers/global_providers.dart';
 import '../../../utils/extensions/custom_extensions.dart';
 import '../../../utils/misc/graphql_undefined_field.dart';
@@ -65,32 +60,8 @@ class AboutRepository {
       .query$GetServerUpdate()
       .getData((a) => a.checkForServerUpdates.map((e) => e.toDto).toList());
 
-  Future<AsyncValue<Version?>> checkUpdate() async {
-    if (isGooglePlayBuild) return const AsyncData(null);
-    if (await isServerHosted?.call() ?? false) return const AsyncData(null);
-    final gitResponse = await AsyncValue.guard<Map<String, dynamic>?>(
-      () async => json.decode(
-        (await http.get(
-          Uri.parse(AppUrls.latestReleaseApiUrl.url),
-        )).body,
-      ),
-    );
-    return gitResponse.copyWithData<Version?>((data) {
-      String? tag = data?["tag_name"];
-      // Release tags are "v0.4.0"; pub_semver can't parse the leading "v".
-      Version? latestReleaseBuildNumber = tag != null
-          ? Version.parse(tag.startsWith('v') ? tag.substring(1) : tag)
-          : null;
-      Version? packageBuildNumber = Version.parse(packageInfo.version);
-      if (latestReleaseBuildNumber != null &&
-          latestReleaseBuildNumber
-              .compareTo(packageBuildNumber)
-              .isGreaterThan(0)) {
-        return latestReleaseBuildNumber;
-      }
-      return null;
-    });
-  }
+  // Compatibility entry point: this fork never checks upstream app releases.
+  Future<AsyncValue<Version?>> checkUpdate() async => const AsyncData(null);
 }
 
 @riverpod

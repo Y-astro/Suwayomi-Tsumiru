@@ -7,7 +7,6 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:tsumiru/src/constants/app_distribution.dart';
 import 'package:tsumiru/src/constants/db_keys.dart';
 import 'package:tsumiru/src/constants/enum.dart';
 import 'package:tsumiru/src/features/auth/data/auth_credentials_store.dart';
@@ -235,7 +234,7 @@ void main() {
     },
   );
 
-  test('stale app-only config schedules only outside Play', () async {
+  test('stale app-only config never schedules checks', () async {
     await config();
     final store = NotificationStateStore(prefs);
     await prefs.setString(
@@ -243,11 +242,8 @@ void main() {
       jsonEncode({...store.readConfig()!.toJson(), 'appUpdatesEnabled': true}),
     );
     await reconcileBackgroundSchedule();
-    expect(schedule.registrations, hasLength(isGooglePlayBuild ? 0 : 1));
-    expect(
-      schedule.cancellations,
-      isGooglePlayBuild ? [kNewChapterPeriodicName] : isEmpty,
-    );
+    expect(schedule.registrations, isEmpty);
+    expect(schedule.cancellations, [kNewChapterPeriodicName]);
   });
 
   test('pausing cancels a queue-only schedule', () async {

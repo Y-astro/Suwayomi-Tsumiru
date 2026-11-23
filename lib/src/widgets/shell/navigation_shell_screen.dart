@@ -8,13 +8,9 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:go_router/go_router.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
-import 'package:pub_semver/pub_semver.dart';
 
-import '../../constants/app_constants.dart';
-import '../../constants/app_distribution.dart';
 import '../../features/about/data/about_repository.dart';
 import '../../features/about/data/web_update_browser.dart';
-import '../../features/about/presentation/about/controllers/about_controller.dart';
 import '../../features/about/presentation/about/widget/app_update_dialog.dart';
 import '../../features/about/presentation/about/widget/update_alert_checker.dart';
 import '../../features/account/data/account_providers.dart';
@@ -23,7 +19,6 @@ import '../../features/offline/data/account_storage_recovery_state.dart';
 import '../../features/offline/presentation/account_storage_recovery_banner.dart';
 import '../../graphql/__generated__/schema.graphql.dart';
 import '../../utils/extensions/custom_extensions.dart';
-import '../../utils/misc/toast/toast.dart';
 import '../desktop/desktop_page_frame.dart';
 import '../desktop/desktop_top_bar.dart';
 import '../main_app_scroll_scope.dart';
@@ -36,42 +31,6 @@ import 'update_progress_banner.dart';
 class NavigationShellScreen extends HookConsumerWidget {
   const NavigationShellScreen({super.key, required this.child});
   final StatefulNavigationShell child;
-
-  Future<void> checkForUpdate({
-    required String? title,
-    required BuildContext context,
-    required WidgetRef ref,
-    required Future<AsyncValue<Version?>> Function() updateCallback,
-    required Toast? toast,
-  }) async {
-    final AsyncValue<Version?> versionResult = await updateCallback();
-    toast?.close();
-    if (!context.mounted) return;
-    versionResult.whenOrNull(
-      data: (version) {
-        if (version == null) return;
-        final dismissed = ref.read(dismissedUpdateVersionProvider);
-        if (dismissed != null && dismissed.isNotEmpty) {
-          Version? skipped;
-          try {
-            skipped = Version.parse(dismissed);
-          } catch (_) {
-            skipped = null;
-          }
-          if (skipped != null && version.compareTo(skipped) <= 0) return;
-        }
-        appUpdateDialog(
-          title: title ?? kAppName,
-          newRelease: "v${version.canonicalizedVersion}",
-          context: context,
-          toast: toast,
-          onSkipChanged: (skip) => ref
-              .read(dismissedUpdateVersionProvider.notifier)
-              .update(skip ? version.canonicalizedVersion : ''),
-        );
-      },
-    );
-  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -86,21 +45,7 @@ class NavigationShellScreen extends HookConsumerWidget {
       return checker.dispose;
     }, [serverHosted, canManage]);
     useEffect(() {
-      if (!serverHosted) {
-        if (isGooglePlayBuild) return null;
-        Future.microtask(() async {
-          await ref.read(startupWebRevisionProvider.future);
-          if (!context.mounted || ref.read(serverHostedWebProvider)) return;
-          await checkForUpdate(
-            title: ref.read(packageInfoProvider).appName,
-            context: context,
-            ref: ref,
-            updateCallback: ref.read(aboutRepositoryProvider).checkUpdate,
-            toast: ref.read(toastProvider),
-          );
-        });
-        return null;
-      }
+      if (!serverHosted) return null;
 
       // Widget subscriptions pause when About or Settings covers this shell.
       final container = ProviderScope.containerOf(context, listen: false);

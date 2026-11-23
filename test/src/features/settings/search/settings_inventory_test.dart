@@ -199,14 +199,16 @@ const List<String> _preReorgIds = [
 ];
 
 /// Old id to new id (or ids) when a setting is deliberately renamed or
-/// merged.
+/// merged or removed from this fork.
 const Map<String, String> _renamedOrMergedIds = {
   'scrollAnimation': 'animatePageTransitions',
+  'notificationsAppUpdates': 'removed: upstream app checks disabled',
 };
 
 void main() {
   test('no setting went missing in the reorg', () {
     final current = allSettingsSearchEntries.map((e) => e.id).toSet();
+    expect(current, isNot(contains('notificationsAppUpdates')));
     final frozen = _preReorgIds.toSet();
     final renamed = _renamedOrMergedIds.keys.toSet();
     expect(

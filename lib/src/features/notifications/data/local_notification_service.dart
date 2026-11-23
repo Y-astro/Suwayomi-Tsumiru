@@ -159,7 +159,6 @@ class LocalNotificationService {
   static const _libraryErrorId = 3;
   static const _downloadErrorId = 4;
   static const _backupId = 5;
-  static const _appUpdateId = 6;
   static const _extensionUpdateId = 7;
   static const _incognitoId = 8;
   static const _downloadStallId = 9;
@@ -201,7 +200,6 @@ class LocalNotificationService {
       (libraryErrorChannelId, 'Library update errors'),
       (downloadErrorChannelId, 'Download errors'),
       (backupChannelId, 'Backup & restore'),
-      (appUpdateChannelId, 'App updates'),
       (extensionUpdateChannelId, 'Extension updates'),
     ]) {
       await android_?.createNotificationChannel(
@@ -432,16 +430,7 @@ class LocalNotificationService {
     body: body,
   );
 
-  Future<void> showAppUpdate(String title, String body, String? url) =>
-      _showSimple(
-        id: _appUpdateId,
-        channelId: appUpdateChannelId,
-        channelName: 'App updates',
-        title: title,
-        body: body,
-        payload: url == null ? null : 'url:$url',
-        importance: Importance.high,
-      );
+  Future<void> showAppUpdate(String title, String body, String? url) async {}
 
   Future<void> showExtensionUpdates(String title, String body) => _showSimple(
     id: _extensionUpdateId,

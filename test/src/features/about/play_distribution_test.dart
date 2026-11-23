@@ -1,3 +1,4 @@
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:graphql/client.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -11,6 +12,7 @@ import 'package:tsumiru/src/features/about/data/about_repository.dart';
 import 'package:tsumiru/src/features/about/presentation/about/widget/app_update_dialog.dart';
 import 'package:tsumiru/src/features/notifications/controller/notification_settings_providers.dart';
 import 'package:tsumiru/src/features/notifications/data/background/notification_background_client.dart';
+import 'package:tsumiru/src/features/notifications/data/local_notification_service.dart';
 import 'package:tsumiru/src/features/notifications/data/notification_state_store.dart';
 import 'package:tsumiru/src/features/offline/data/background/background_token_record.dart';
 import 'package:tsumiru/src/global_providers/global_providers.dart';
@@ -18,10 +20,17 @@ import 'package:tsumiru/src/l10n/generated/app_localizations.dart';
 
 const play = bool.fromEnvironment('TSUMIRU_GOOGLE_PLAY');
 
+class _NoNotificationsPlugin implements FlutterLocalNotificationsPlugin {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw StateError(
+    'Unexpected notification call: ${invocation.memberName}',
+  );
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('About checks GitHub only outside Play', () async {
+  test('About never checks upstream app releases', () async {
     var calls = 0;
     final repository = AboutRepository(
       client: GraphQLClient(
@@ -44,8 +53,14 @@ void main() {
       }),
     );
     expect(result.hasError, isFalse);
-    expect(result.value?.toString(), play ? isNull : '9.0.0');
-    expect(calls, play ? 0 : 1);
+    expect(result.value, isNull);
+    expect(calls, 0);
+  });
+
+  test('legacy app notification calls never reach the platform', () async {
+    await LocalNotificationService(
+      _NoNotificationsPlugin(),
+    ).showAppUpdate('Upstream update', '9.0.0', 'https://github.com/release');
   });
 
   test('server update checks remain available in every distribution', () async {
@@ -83,7 +98,7 @@ void main() {
     expect(updates?.single.tag, 'v2.0.0');
   });
 
-  test('headless checks GitHub only outside Play', () async {
+  test('headless never checks upstream app releases', () async {
     var calls = 0;
     const record = BackgroundTokenRecord(gen: 0, authType: 'none');
     final client = NotificationBackgroundClient(
@@ -104,11 +119,11 @@ void main() {
       }),
     );
     final result = await client.fetchLatestRelease();
-    expect(result?.version, play ? isNull : '9.0.0');
-    expect(calls, play ? 0 : 1);
+    expect(result, isNull);
+    expect(calls, 0);
   });
 
-  test('stale app-only worker configurations cannot enable Play checks', () {
+  test('stale app-only worker configurations cannot enable checks', () {
     const config = NotificationWorkerConfig(
       serverId: 's',
       endpoint: NotificationEndpoint(baseUrl: 'https://server.test'),
@@ -123,9 +138,9 @@ void main() {
       config,
       NotificationWorkerConfig.fromJson(stale),
     ]) {
-      expect(effective.appUpdatesEnabled, !play);
-      expect(effective.anyEnabled, !play);
-      expect(effective.toJson()['appUpdatesEnabled'], !play);
+      expect(effective.appUpdatesEnabled, isFalse);
+      expect(effective.anyEnabled, isFalse);
+      expect(effective.toJson()['appUpdatesEnabled'], isFalse);
     }
     final extensions = NotificationWorkerConfig.fromJson({
       ...stale,
@@ -136,7 +151,7 @@ void main() {
   });
 
   test(
-    'Play ignores the stored app preference without overwriting it',
+    'stored app preference cannot enable checks or overwrite legacy value',
     () async {
       SharedPreferences.setMockInitialValues({
         DBKeys.notificationsAppUpdatesEnabled.name: true,
@@ -146,15 +161,13 @@ void main() {
         overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
       );
       addTearDown(container.dispose);
-      expect(container.read(notificationsAppUpdatesEnabledProvider), !play);
-      if (play) {
-        final notifier = container.read(
-          notificationsAppUpdatesEnabledProvider.notifier,
-        );
-        notifier.update(true);
-        notifier.updateWithPreviousState((_) => true);
-        expect(container.read(notificationsAppUpdatesEnabledProvider), isFalse);
-      }
+      expect(container.read(notificationsAppUpdatesEnabledProvider), isFalse);
+      final notifier = container.read(
+        notificationsAppUpdatesEnabledProvider.notifier,
+      );
+      notifier.update(true);
+      notifier.updateWithPreviousState((_) => true);
+      expect(container.read(notificationsAppUpdatesEnabledProvider), isFalse);
       await Future<void>.delayed(Duration.zero);
       expect(prefs.getBool(DBKeys.notificationsAppUpdatesEnabled.name), isTrue);
     },
@@ -187,10 +200,7 @@ void main() {
       );
       await tester.tap(find.text('Open update'));
       await tester.pumpAndSettle();
-      expect(
-        find.byType(AlertDialog),
-        server || !play ? findsOneWidget : findsNothing,
-      );
+      expect(find.byType(AlertDialog), server ? findsOneWidget : findsNothing);
       if (server) {
         expect(
           find.byType(ElevatedButton),

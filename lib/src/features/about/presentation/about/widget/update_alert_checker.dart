@@ -26,10 +26,6 @@ class UpdateAlertChecker {
     container.read(sharedPreferencesProvider),
     'server',
   );
-  late final webReminder = UpdateReminderStore(
-    container.read(sharedPreferencesProvider),
-    'webUI',
-  );
   Timer? _timer;
   bool _active = true, _busy = false;
   bool get _valid => _active && context.mounted;
@@ -142,15 +138,6 @@ class UpdateAlertChecker {
             ?.where((update) => update.channel == about?.buildType)
             .firstOrNull;
       }
-      final webSettings = _valid && _canManage && hosted
-          ? await repository.settings()
-          : null;
-      if (!_valid || !_canManage) return;
-      final checkWeb =
-          webSettings?.webUIFlavor == Enum$WebUIFlavor.TSUMIRU &&
-          webSettings?.webUIUpdateCheckInterval == 0 &&
-          settings.webUIInformAvailableUpdate;
-      final webUpdate = checkWeb ? await repository.check() : null;
       if (!_valid || !_canManage) return;
       final update = serverUpdate;
       if (context.mounted &&
@@ -171,23 +158,6 @@ class UpdateAlertChecker {
             downloadUrl: update.url,
             onRemindLater: serverReminder.remindLater,
             onIgnore: () => serverReminder.ignore(update.tag!),
-          ),
-        );
-      }
-      if (_valid &&
-          _canManage &&
-          checkWeb &&
-          webUpdate?.updateAvailable == true &&
-          webReminder.show(webUpdate!.tag)) {
-        await _open(
-          UpdateAlertDialog(
-            info: l10n.tsumiruVersionAvailable(
-              webUpdate.tag,
-              webUpdate.channel.name,
-            ),
-            changelogUrl: changelog,
-            onRemindLater: webReminder.remindLater,
-            onIgnore: () => webReminder.ignore(webUpdate.tag),
           ),
         );
       }
