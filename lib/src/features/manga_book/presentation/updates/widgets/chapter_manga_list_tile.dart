@@ -102,9 +102,7 @@ class ChapterMangaListTile extends HookConsumerWidget {
                     chapterId: chapterWithMangaDto.id,
                     showReaderLayoutAnimation: true,
                   ).push(context);
-                  // Refresh the whole series after reading because navigation may change other chapter rows too.
-                  if (!context.mounted) return;
-                  await refreshManga();
+                  // Confirmed read writes patch the loaded Updates rows in place.
                 }
               }),
               onLongPress: () => toggleSelect(chapterWithMangaDto),

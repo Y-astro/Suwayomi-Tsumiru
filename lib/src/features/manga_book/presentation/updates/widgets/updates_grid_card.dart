@@ -26,7 +26,6 @@ class UpdatesGridCard extends HookConsumerWidget {
   const UpdatesGridCard({
     super.key,
     required this.group,
-    required this.refreshManga,
     required this.refreshRowActions,
     required this.isSelectedFor,
     required this.canTapSelect,
@@ -37,7 +36,6 @@ class UpdatesGridCard extends HookConsumerWidget {
   });
 
   final UpdatesGroupedEntry group;
-  final Future<void> Function() refreshManga;
   final Future<void> Function(Set<int> mangaIds) refreshRowActions;
   final bool Function(ChapterWithMangaDto) isSelectedFor;
   final bool canTapSelect;
@@ -86,8 +84,6 @@ class UpdatesGridCard extends HookConsumerWidget {
         chapterId: chapter.id,
         showReaderLayoutAnimation: true,
       ).push(context);
-      if (!context.mounted) return;
-      await refreshManga();
     }
 
     return GestureDetector(

@@ -70,3 +70,28 @@ List<ChapterWithMangaDto> patchRowsForManga({
   }
   return patched;
 }
+
+/// Preserve page identity when a saved read flag is unchanged or not loaded.
+List<List<ChapterWithMangaDto>> patchReadStatesInPages(
+  List<List<ChapterWithMangaDto>> pages,
+  List<ChapterDto> chapters,
+) {
+  if (chapters.isEmpty) return pages;
+  final readStates = {for (final chapter in chapters) chapter.id: chapter.user.isRead};
+  var patched = pages;
+  for (var pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+    final page = pages[pageIndex];
+    List<ChapterWithMangaDto>? changed;
+    for (var index = 0; index < page.length; index++) {
+      final row = page[index];
+      final read = readStates[row.id];
+      if (read == null || read == row.user.isRead) continue;
+      changed ??= List.of(page);
+      changed[index] = row.copyWith(user: row.user.copyWith(isRead: read));
+    }
+    if (changed == null) continue;
+    if (identical(patched, pages)) patched = List.of(pages);
+    patched[pageIndex] = changed;
+  }
+  return patched;
+}

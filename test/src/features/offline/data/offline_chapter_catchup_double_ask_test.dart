@@ -53,6 +53,7 @@ class _EmptyUpdatesRepository extends UpdatesRepository {
   Future<UpdatesPage?> getRecentChaptersPage({
     int pageNo = 0,
     UpdatesFilter filter = kNoUpdatesFilter,
+    int? offset,
   }) async => null;
 }
 

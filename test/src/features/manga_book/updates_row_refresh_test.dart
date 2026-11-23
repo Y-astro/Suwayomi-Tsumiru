@@ -81,6 +81,44 @@ ChapterDto _fresh({required int id, bool isRead = false}) =>
     );
 
 void main() {
+  group('patchReadStatesInPages', () {
+    test('unloaded and unchanged writes preserve all page identities', () {
+      final pages = [
+        [_row(id: 1, isRead: true)],
+        [_row(id: 2)],
+      ];
+      expect(identical(patchReadStatesInPages(pages, []), pages), isTrue);
+      expect(
+        identical(
+          patchReadStatesInPages(pages, [_fresh(id: 99, isRead: true)]),
+          pages,
+        ),
+        isTrue,
+      );
+      expect(
+        identical(
+          patchReadStatesInPages(pages, [_fresh(id: 1, isRead: true)]),
+          pages,
+        ),
+        isTrue,
+      );
+    });
+
+    test('only changed pages are copied, including confirmed mark-unread', () {
+      final pages = [
+        [_row(id: 1, isRead: true)],
+        [_row(id: 2)],
+      ];
+      final read = patchReadStatesInPages(pages, [_fresh(id: 2, isRead: true)]);
+      expect(identical(read[0], pages[0]), isTrue);
+      expect(identical(read[1], pages[1]), isFalse);
+      expect(read[1].single.user.isRead, isTrue);
+      expect(pages[1].single.user.isRead, isFalse);
+      final unread = patchReadStatesInPages(read, [_fresh(id: 2)]);
+      expect(unread[1].single.user.isRead, isFalse);
+    });
+  });
+
   group('patchRowsForManga', () {
     test('a lagging refetch cannot un-read a row', () {
       final patched = patchRowsForManga(
