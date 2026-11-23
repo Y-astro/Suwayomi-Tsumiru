@@ -217,6 +217,8 @@ class _HeadTile extends HookConsumerWidget {
                     chapterId: chapter.id,
                     showReaderLayoutAnimation: true,
                   ).push(context);
+                  if (!context.mounted) return;
+                  await refreshManga();
                 }
               }),
               onLongPress: () => toggleSelect(chapter),
@@ -466,6 +468,8 @@ class _TailTile extends HookConsumerWidget {
                     chapterId: chapter.id,
                     showReaderLayoutAnimation: true,
                   ).push(context);
+                  if (!context.mounted) return;
+                  await refreshManga();
                 }
               }),
               onLongPress: () => toggleSelect(chapter),

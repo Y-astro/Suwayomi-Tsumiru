@@ -34,7 +34,7 @@ class MangaBookRepository {
   final GraphQLClient client;
   final OfflineDatabase? Function()? readOfflineDb;
   final void Function()? onChaptersSynced;
-  final void Function(List<ChapterDto>)? onReadStateChanged;
+  final void Function()? onReadStateChanged;
 
   Future<MangaDto?> addMangaToLibrary(int mangaId) => client
       .mutate$UpdateManga(
@@ -99,7 +99,7 @@ class MangaBookRepository {
       .getData((data) {
         if (batch.patch.isRead != null &&
             (data.updateChapters?.chapters.isNotEmpty ?? false)) {
-          onReadStateChanged?.call(data.updateChapters!.chapters);
+          onReadStateChanged?.call();
         }
       });
 
@@ -235,7 +235,7 @@ class MangaBookRepository {
           // Throw on failure so offline callers keep the change pending.
           .getData((data) {
             if (patch.isRead != null && data.updateChapter?.chapter != null) {
-              onReadStateChanged?.call([data.updateChapter!.chapter]);
+              onReadStateChanged?.call();
             }
           });
 
@@ -395,9 +395,7 @@ MangaBookRepository mangaBookRepository(Ref ref) => MangaBookRepository(
     ref.invalidate(failedUpdatesProvider);
     ref.invalidate(failedUpdateCountProvider);
   },
-  onReadStateChanged: (chapters) {
-    if (ref.mounted) {
-      ref.read(updatesReadRevisionProvider.notifier).bump(chapters);
-    }
+  onReadStateChanged: () {
+    if (ref.mounted) ref.read(updatesReadRevisionProvider.notifier).bump();
   },
 );
