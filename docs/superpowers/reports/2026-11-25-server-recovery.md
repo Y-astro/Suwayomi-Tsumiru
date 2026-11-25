@@ -1,0 +1,13 @@
+# Server recovery acceptance
+
+The server now retries failed title synchronization and failed unread chapter downloads at +1, +2, +6 and +12 hours after main library update completion. Download recovery includes work that was still queued when library synchronization completed, so later image failures remain covered. Successful title reconciliation does not cancel the download cycle. Removed, read, downloaded, active and deliberately paused queue entries are protected.
+
+Installed extensions are checked every six hours using existing configured repositories, with maintenance deferred while work is busy. Extensions update before due retry dispatch. A successful extension update can recover its affected failed downloads once. Deadlines and consumed slots persist across restart and coalesce after device sleep. Normal scheduled retry attempts stop after the fourth slot; a new daily update starts a fresh cycle.
+
+Validation passed: 22 native tests against the packaged production classes, 4 packaging tests and 160 controlled-activation tests. The patch applies to pinned upstream source `40bc5da57820324ed0ae724cbbc020cc4673b594` and exactly reproduces all 12 changed source/test files. The overlay changes seven reviewed class families and preserves 83,758 unrelated ZIP occurrences and previous custom-build provenance.
+
+The reviewed base JAR is `a8f28de60db71e874e0930c5ba0abd8487dce7597b48abdc54bea146634676c3`. The installed candidate is `ec46fe37f0ee27b58155321714634cefd28a3514a901cf38d07e32e4f0d63c72`, built from patch `8cfcc364392bc1a821fb3f37790d99e1e6eb595b6a46f59491ce0efd6ff3b50e`. Version remains v2.4.2366/r2366; custom downloader, Android, WebUI, library-query and logging changes remain preserved.
+
+The complete 59-file release manifest changed only the JAR. Only Suwayomi and its capture companion restarted. All unrelated managed process identities and eight disabled-service flags remained unchanged. The midnight Reading update and 20,000,000-byte server log cap remain intact. The new backend survived SSH disconnection. The first automatic extension check ran and persisted its timestamp; no new extension versions were installed during that check. Five remaining previously stuck chapter downloads completed after the backend reload, verified by server state and their five CBZ archives containing 104 image pages.
+
+Future real +1/+2/+6/+12-hour windows and the next six-hour scan have not elapsed. Recovery still depends on working source endpoints and published extension fixes; it cannot guarantee recovery from outages, CAPTCHA or broken releases. No complete production library update was triggered for testing, no upstream server upgrade occurred, and no client/reader/native-engine files or launcher changed.

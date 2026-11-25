@@ -12,8 +12,12 @@ unless explicitly requested. Push completed, verified changes to the user's fork
    explicit update controls.
 2. **Library update errors and bounded retries — completed and pushed.** Correct stale error
    markers after a successful title refresh and synchronization with the latest
-   chapters. Retry error-marked titles at one hour and two hours after the main
-   library update finishes, then stop automatic retries for that update cycle.
+   chapters. Retry error-marked titles at one, two, six, and twelve hours after
+   the main library update finishes, then stop retries for that cycle. Failed
+   unread chapter downloads have independent recovery deadlines at the same
+   offsets. Every six hours, while queues are idle, check configured repositories
+   and auto-update installed extensions; successful updates retry affected failed
+   downloads once. Recovery schedules persist on the server.
    Updates follow-up: confirmed read/unread writes refresh its cached cards and
    chapter badges, including saves finishing after reader exit. Unread-only
    filtering removes fully read entries and supports an empty result.
