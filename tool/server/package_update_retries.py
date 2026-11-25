@@ -12,9 +12,6 @@ import zipfile
 BASE_SHA256 = "a8f28de60db71e874e0930c5ba0abd8487dce7597b48abdc54bea146634676c3"
 UPSTREAM_COMMIT = "40bc5da57820324ed0ae724cbbc020cc4673b594"
 OWNERS = (
-    "suwayomi/tachidesk/manga/impl/Manga",
-    "suwayomi/tachidesk/manga/impl/MangaKt",
-    "suwayomi/tachidesk/manga/impl/update/IUpdater",
     "suwayomi/tachidesk/manga/impl/update/Updater",
     "suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetries",
     "suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetryState",
@@ -22,7 +19,6 @@ OWNERS = (
     "suwayomi/tachidesk/manga/impl/update/RecoveryRetrySchedule",
     "suwayomi/tachidesk/manga/impl/update/RecoveryRetryState",
     "suwayomi/tachidesk/manga/impl/update/ServerRecoveryManager",
-    "suwayomi/tachidesk/manga/impl/update/ServerRecoveryPlanKt",
 )
 METADATA = "META-INF/tsumiru-server-recovery.json"
 
@@ -64,7 +60,7 @@ def package(base, classes, output, patch, expected_sha=BASE_SHA256):
         if len(body) < 8 or body[:4] != b"\xca\xfe\xba\xbe" or int.from_bytes(body[6:8], "big") != 65:
             raise ValueError("Expected Java 21 class: " + name)
         selected[name] = body
-    if any(owner + ".class" not in selected for owner in OWNERS if not owner.endswith("PlanKt")):
+    if any(owner + ".class" not in selected for owner in OWNERS):
         raise ValueError("Missing reviewed class owner")
     with zipfile.ZipFile(base) as old:
         names = old.namelist()

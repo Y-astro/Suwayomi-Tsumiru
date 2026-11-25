@@ -9,11 +9,12 @@ from configured repositories while the server is idle.
 Key behaviors:
 1. Deadlines (+1h, +2h, +6h, +12h) are anchored to the main update completion timestamp.
 2. Library retries and download retries maintain independent clocks and states. Successful library reconciliation does not cancel download recovery.
-3. Extension checks run on a persistent 6-hour cycle (surviving restarts), checking configured extension repositories and updating only installed extensions.
-4. If deadlines coincide, extensions update before retry dispatch.
-5. Successfully updated extensions trigger one recovery attempt for their affected failed downloads.
-6. Requeue only targets entries currently in `ERROR` that are unread, in library, and not downloaded; removed or deliberately paused queue entries are never recreated or resumed.
-7. Missed retry slots coalesce after device sleep or restart.
+3. Pending downloads are captured when the main update completes, so image failures that occur afterward still receive recovery deadlines.
+4. Extension checks run on a persistent 6-hour cycle (surviving restarts), checking configured extension repositories and updating only installed extensions.
+5. If deadlines coincide, extensions update before retry dispatch.
+6. Successfully updated extensions trigger one recovery attempt for their affected failed downloads.
+7. Requeue only targets entries currently in `ERROR` that are unread, in library, and not downloaded; removed or deliberately paused queue entries are never recreated or resumed.
+8. Missed retry slots coalesce after device sleep or restart.
 
 ## Reproduce
 
@@ -47,7 +48,7 @@ python3 "$tsumiru/tool/server/package_update_retries.py" \
   --patch "$tsumiru/tool/server/library-update-retries-v2.4.2366.patch" \
   --output /path/to/suwayomi-candidate.jar
 
-./gradlew :server:test --tests '*ServerRecovery*' --tests '*LibraryUpdate*' --no-daemon \
+./gradlew :server:test --tests '*ServerRecovery*' --tests '*LibraryUpdate*' --tests '*ExtensionUpdateScheduleTest' --no-daemon \
   --init-script "$tsumiru/tool/server/packaged-tests.init.gradle.kts" \
   -Dtsumiru.server.jar=/path/to/suwayomi-candidate.jar
 
