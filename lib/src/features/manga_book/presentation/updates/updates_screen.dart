@@ -768,7 +768,6 @@ class UpdatesScreen extends HookConsumerWidget {
     }, [filterFocus, displayFocus]);
     DesktopToolbarBox buildFilterBox(bool compact) => DesktopToolbarBox(
       key: filterButtonKey,
-      borderColor: hasActiveFilters ? scheme.primary : null,
       child: InkWell(
         focusNode: filterFocus,
         onTap: () => showAnchoredPanel(
@@ -827,6 +826,22 @@ class UpdatesScreen extends HookConsumerWidget {
       ref.watch(updateProgressSocketProvider),
       context.l10n.update,
     );
+    DesktopToolbarBox buildRefreshBox(bool compact) => DesktopToolbarBox(
+      child: InkWell(
+        onTap: resetList,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            spacing: 8,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(FluentIcons.arrow_sync_24_regular, size: 20),
+              if (!compact) Text(context.l10n.refresh),
+            ],
+          ),
+        ),
+      ),
+    );
     DesktopToolbarBox buildUpdateBox(bool compact) => DesktopToolbarBox(
       borderColor: updateState.running ? scheme.primary : null,
       child: InkWell(
@@ -878,6 +893,10 @@ class UpdatesScreen extends HookConsumerWidget {
       ),
     );
     List<Widget> desktopActions(bool compact) => [
+      if (compact)
+        Tooltip(message: context.l10n.refresh, child: buildRefreshBox(true))
+      else
+        buildRefreshBox(false),
       if (compact)
         Tooltip(message: updateState.label, child: buildUpdateBox(true))
       else
@@ -1061,6 +1080,7 @@ class UpdatesScreen extends HookConsumerWidget {
           final compact = updatesToolbarIsCompact(
             context,
             constraints,
+            refreshLabel: context.l10n.refresh,
             updateLabel: updateState.label,
             upcomingLabel: context.l10n.upcoming,
             filterLabel: context.l10n.filter,
@@ -1068,7 +1088,7 @@ class UpdatesScreen extends HookConsumerWidget {
           return desktopToolbarRow(
             search: search,
             actions: desktopActions(compact),
-            spacedActionCount: 4,
+            spacedActionCount: 5,
             gap: compact ? 4 : kDesktopTopBarGap,
           );
         },

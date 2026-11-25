@@ -256,8 +256,8 @@ double libraryTopBarSlotMinWidth(int trailingCount) =>
 // Compact controls first so the search retains its preferred width.
 double updatesTopBarSlotMinWidth() {
   return 2 * kDesktopToolbarSlotHPadding +
-      5 * kDesktopTopBarGap +
-      2 * (_iconOnlyBoxWidth + kToolbarBoxBorderWidth) +
+      6 * kDesktopTopBarGap +
+      3 * (_iconOnlyBoxWidth + kToolbarBoxBorderWidth) +
       (kToolbarFilterCompactWidth + kToolbarBoxBorderWidth) +
       (kToolbarDisplayBoxWidth + kToolbarBoxBorderWidth) +
       2 * kDesktopToolbarIconButtonExtent +
@@ -268,6 +268,7 @@ double updatesTopBarSlotMinWidth() {
 bool updatesToolbarIsCompact(
   BuildContext context,
   BoxConstraints constraints, {
+  required String refreshLabel,
   required String updateLabel,
   required String upcomingLabel,
   required String filterLabel,
@@ -278,7 +279,8 @@ bool updatesToolbarIsCompact(
   const labelledChrome = 12.0 + 12.0 + 20.0 + 8.0;
   final neededBesidesSearch =
       2 * kDesktopToolbarSlotHPadding +
-      5 * kDesktopTopBarGap +
+      6 * kDesktopTopBarGap +
+      (labelledChrome + textWidth(refreshLabel) + kToolbarBoxBorderWidth) +
       (labelledChrome + textWidth(updateLabel) + kToolbarBoxBorderWidth) +
       (labelledChrome + textWidth(upcomingLabel) + kToolbarBoxBorderWidth) +
       (kToolbarFilterFullChrome +
