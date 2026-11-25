@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Overlay reviewed updater classes without replacing existing server fixes."""
+"""Overlay reviewed recovery and updater classes without replacing existing server fixes."""
 
 import argparse
 import copy
@@ -9,7 +9,7 @@ from pathlib import Path
 import warnings
 import zipfile
 
-BASE_SHA256 = "16e21700dfd60cab4b9f113839dc2c04d10066df896ad3bc8d31522801bc695f"
+BASE_SHA256 = "a8f28de60db71e874e0930c5ba0abd8487dce7597b48abdc54bea146634676c3"
 UPSTREAM_COMMIT = "40bc5da57820324ed0ae724cbbc020cc4673b594"
 OWNERS = (
     "suwayomi/tachidesk/manga/impl/Manga",
@@ -18,8 +18,13 @@ OWNERS = (
     "suwayomi/tachidesk/manga/impl/update/Updater",
     "suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetries",
     "suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetryState",
+    "suwayomi/tachidesk/manga/impl/update/ExtensionUpdateSchedule",
+    "suwayomi/tachidesk/manga/impl/update/RecoveryRetrySchedule",
+    "suwayomi/tachidesk/manga/impl/update/RecoveryRetryState",
+    "suwayomi/tachidesk/manga/impl/update/ServerRecoveryManager",
+    "suwayomi/tachidesk/manga/impl/update/ServerRecoveryPlanKt",
 )
-METADATA = "META-INF/tsumiru-library-update-retries.json"
+METADATA = "META-INF/tsumiru-server-recovery.json"
 
 
 def digest(path):
@@ -59,22 +64,22 @@ def package(base, classes, output, patch, expected_sha=BASE_SHA256):
         if len(body) < 8 or body[:4] != b"\xca\xfe\xba\xbe" or int.from_bytes(body[6:8], "big") != 65:
             raise ValueError("Expected Java 21 class: " + name)
         selected[name] = body
-    if any(owner + ".class" not in selected for owner in OWNERS):
+    if any(owner + ".class" not in selected for owner in OWNERS if not owner.endswith("PlanKt")):
         raise ValueError("Missing reviewed class owner")
     with zipfile.ZipFile(base) as old:
         names = old.namelist()
         if METADATA in names:
-            raise ValueError("Retry patch already installed")
+            raise ValueError("Server recovery patch already installed")
         if any(names.count(name) != 1 for name in names if owned(name)):
             raise ValueError("Ambiguous original class")
         provenance = {
-            "format": 1,
+            "format": 2,
             "base_jar_sha256": expected_sha,
             "upstream_commit": UPSTREAM_COMMIT,
             "source_patch_sha256": digest(patch),
             "class_sha256": {name: hashlib.sha256(body).hexdigest() for name, body in sorted(selected.items())},
         }
-        stamp = old.getinfo(OWNERS[0] + ".class").date_time
+        stamp = old.getinfo("suwayomi/tachidesk/manga/impl/update/Updater.class").date_time
         created = False
         try:
             with output.open("xb") as target:

@@ -100,6 +100,39 @@ index fe5a268..56365ac 100644
              }
          }
      }
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/ExtensionUpdateSchedule.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/ExtensionUpdateSchedule.kt
+new file mode 100644
+index 0000000..7a54ef6
+--- /dev/null
++++ b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/ExtensionUpdateSchedule.kt
+@@ -0,0 +1,27 @@
++package suwayomi.tachidesk.manga.impl.update
++
++class ExtensionUpdateSchedule(
++    private val getInitialLastCheck: () -> Long,
++    private val saveLastCheck: (Long) -> Unit,
++) {
++    companion object {
++        const val INTERVAL_MS = 6 * 3_600_000L
++    }
++
++    var lastCheck: Long = getInitialLastCheck()
++        private set
++
++    val nextDueAt: Long
++        get() = if (lastCheck <= 0L) 0L else lastCheck + INTERVAL_MS
++
++    fun isDue(now: Long, busy: Boolean = false): Boolean {
++        if (busy) return false
++        if (lastCheck <= 0L) return true
++        return now >= lastCheck + INTERVAL_MS
++    }
++
++    fun markChecked(now: Long) {
++        lastCheck = now
++        saveLastCheck(now)
++    }
++}
 diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/IUpdater.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/IUpdater.kt
 index a7ba6f7..df0e640 100644
 --- a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/IUpdater.kt
@@ -113,8 +146,371 @@ index a7ba6f7..df0e640 100644
      @Deprecated("Replaced with updates", replaceWith = ReplaceWith("updates"))
      val status: Flow<UpdateStatus>
  
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetries.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetries.kt
+new file mode 100644
+index 0000000..d1d78b3
+--- /dev/null
++++ b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetries.kt
+@@ -0,0 +1,76 @@
++package suwayomi.tachidesk.manga.impl.update
++
++import kotlinx.serialization.Serializable
++
++@Serializable
++data class LibraryUpdateRetryState(
++    val completedAt: Long,
++    val mangaIds: Set<Int>,
++    val attempts: Int = 0,
++) {
++    init {
++        require(completedAt >= 0 && attempts in 0..4 && mangaIds.all { it > 0 })
++    }
++}
++
++/** Called under the updater lifecycle lock; persistence completes before dispatch. */
++class LibraryUpdateRetries(
++    initial: LibraryUpdateRetryState? = null,
++    private val save: (LibraryUpdateRetryState?) -> Unit = {},
++) {
++    companion object {
++        val DEADLINES_MS = listOf(
++            1 * 3_600_000L,
++            2 * 3_600_000L,
++            6 * 3_600_000L,
++            12 * 3_600_000L,
++        )
++    }
++
++    var snapshot: LibraryUpdateRetryState? = initial
++        private set
++
++    val failedIds: Set<Int> get() = snapshot?.mangaIds.orEmpty()
++
++    val nextDueAt: Long?
++        get() = snapshot?.takeIf { it.attempts < DEADLINES_MS.size }?.let {
++            it.completedAt + DEADLINES_MS[it.attempts]
++        }
++
++    private fun replace(state: LibraryUpdateRetryState?) {
++        if (state == snapshot) return
++        save(state)
++        snapshot = state
++    }
++
++    fun clear() = replace(null)
++
++    fun finishMainUpdate(
++        completedAt: Long,
++        failedIds: Set<Int>,
++    ) = replace(failedIds.takeIf { it.isNotEmpty() }?.let { LibraryUpdateRetryState(completedAt, it.toSet()) })
++
++    fun chapterSynced(mangaId: Int) = retain(failedIds - mangaId)
++
++    fun retain(ids: Set<Int>) {
++        val state = snapshot ?: return
++        val remaining = state.mangaIds.intersect(ids)
++        replace(remaining.takeIf { it.isNotEmpty() }?.let { state.copy(mangaIds = it) })
++    }
++
++    fun claimDue(
++        now: Long,
++        busy: Boolean = false,
++    ): Set<Int> {
++        val state = snapshot ?: return emptySet()
++        if (busy || now < state.completedAt) return emptySet()
++        val elapsed = now - state.completedAt
++        var dueAttempt = 0
++        while (dueAttempt < DEADLINES_MS.size && elapsed >= DEADLINES_MS[dueAttempt]) {
++            dueAttempt++
++        }
++        if (dueAttempt <= state.attempts) return emptySet()
++        replace(state.copy(attempts = dueAttempt))
++        return state.mangaIds
++    }
++}
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/ServerRecoveryManager.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/ServerRecoveryManager.kt
+new file mode 100644
+index 0000000..36b713f
+--- /dev/null
++++ b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/ServerRecoveryManager.kt
+@@ -0,0 +1,194 @@
++package suwayomi.tachidesk.manga.impl.update
++
++import android.app.Application
++import android.content.Context
++import io.github.oshai.kotlinlogging.KotlinLogging
++import kotlinx.serialization.json.Json
++import org.jetbrains.exposed.v1.core.and
++import org.jetbrains.exposed.v1.core.eq
++import org.jetbrains.exposed.v1.core.inList
++import org.jetbrains.exposed.v1.jdbc.selectAll
++import org.jetbrains.exposed.v1.jdbc.transactions.transaction
++import suwayomi.tachidesk.manga.impl.download.DownloadManager
++import suwayomi.tachidesk.manga.impl.download.model.DownloadQueueItem
++import suwayomi.tachidesk.manga.impl.download.model.DownloadState
++import suwayomi.tachidesk.manga.impl.download.model.DownloadState.Queued
++import suwayomi.tachidesk.manga.impl.download.model.Status
++import suwayomi.tachidesk.manga.impl.extension.Extension
++import suwayomi.tachidesk.manga.impl.extension.ExtensionsList
++import suwayomi.tachidesk.manga.model.table.ChapterTable
++import suwayomi.tachidesk.manga.model.table.ExtensionTable
++import suwayomi.tachidesk.manga.model.table.MangaTable
++import suwayomi.tachidesk.manga.model.table.SourceTable
++import uy.kohesive.injekt.Injekt
++import uy.kohesive.injekt.api.get
++
++object ServerRecoveryManager {
++    private val logger = KotlinLogging.logger {}
++    private val preferences by lazy { Injekt.get<Application>().getSharedPreferences("server_util", Context.MODE_PRIVATE) }
++
++    private const val DOWNLOAD_RECOVERY_KEY = "downloadUpdateRetriesV1"
++    private const val EXTENSION_UPDATE_KEY = "extensionAutoUpdateLastCheckV1"
++
++    val recoveryLock = Any()
++
++    // Test overrides / hooks
++    var queueProvider: () -> List<DownloadQueueItem> = { DownloadManager.getStatus().queue }
++    var downloaderStateProvider: () -> Status = { DownloadManager.getStatus().status }
++    var downloaderStarter: () -> Unit = { DownloadManager.start() }
++    var extensionFetcher: suspend () -> Unit = { ExtensionsList.fetchExtensions() }
++    var extensionUpdater: suspend (String) -> String = { Extension.updateExtension(it) }
++
++    val downloadRetries by lazy {
++        RecoveryRetrySchedule(
++            initial =
++                runCatching {
++                    preferences.getString(DOWNLOAD_RECOVERY_KEY, null)?.let { Json.decodeFromString<RecoveryRetryState>(it) }
++                }.onFailure { logger.error(it) { "Cannot restore download retry plan" } }.getOrNull(),
++            save = { state ->
++                val editor = preferences.edit()
++                if (state == null) editor.remove(DOWNLOAD_RECOVERY_KEY) else editor.putString(DOWNLOAD_RECOVERY_KEY, Json.encodeToString(state))
++                if (!editor.commit()) logger.error { "Cannot persist download retry plan" }
++            },
++        )
++    }
++
++    val extensionSchedule by lazy {
++        ExtensionUpdateSchedule(
++            getInitialLastCheck = { preferences.getLong(EXTENSION_UPDATE_KEY, 0L) },
++            saveLastCheck = { timestamp ->
++                val editor = preferences.edit()
++                editor.putLong(EXTENSION_UPDATE_KEY, timestamp)
++                if (!editor.commit()) logger.error { "Cannot persist extension update check timestamp" }
++            },
++        )
++    }
++
++    fun onMainUpdateFinished(completedAt: Long) {
++        synchronized(recoveryLock) {
++            val failedChapters = getEligibleFailedChapterIds()
++            if (failedChapters.isNotEmpty()) {
++                downloadRetries.startCycle(completedAt, failedChapters)
++                logger.info { "Armed download recovery cycle for ${failedChapters.size} failed chapters" }
++            } else {
++                downloadRetries.clear()
++            }
++        }
++    }
++
++    fun onLibraryReset() {
++        synchronized(recoveryLock) {
++            downloadRetries.clear()
++        }
++    }
++
++    fun isDownloadManagerBusy(): Boolean {
++        if (downloaderStateProvider() == Status.Started) return true
++        return queueProvider().any { it.state == DownloadState.Downloading || it.state == Queued }
++    }
++
++    fun getEligibleFailedChapterIds(): Set<Int> {
++        val currentQueue = queueProvider()
++        val errorChapterIds = currentQueue.filter { it.state == DownloadState.Error }.map { it.chapterId }.toSet()
++        if (errorChapterIds.isEmpty()) return emptySet()
++
++        return transaction {
++            val eligible = (ChapterTable innerJoin MangaTable)
++                .selectAll()
++                .where {
++                    (ChapterTable.id inList errorChapterIds) and
++                        (ChapterTable.isRead eq false) and
++                        (ChapterTable.isDownloaded eq false) and
++                        (MangaTable.inLibrary eq true)
++                }
++                .map { it[ChapterTable.id].value }
++                .toSet()
++            eligible
++        }
++    }
++
++    /**
++     * Requeues the given chapter IDs if they are currently in the queue with state == Error.
++     * Never recreates missing entries.
++     */
++    fun requeueFailedChapters(chapterIds: Set<Int>): Int {
++        if (chapterIds.isEmpty()) return 0
++        var count = 0
++        val currentQueue = queueProvider()
++        val toRequeue = currentQueue.filter { it.chapterId in chapterIds && it.state == DownloadState.Error }
++        for (item in toRequeue) {
++            item.state = Queued
++            item.progress = 0f
++            count++
++        }
++        if (count > 0) {
++            downloaderStarter()
++        }
++        return count
++    }
++
++    suspend fun performExtensionMaintenance(now: Long): Set<String> {
++        logger.info { "Starting 6-hour extension update check" }
++        extensionSchedule.markChecked(now)
++
++        runCatching {
++            extensionFetcher()
++        }.onFailure {
++            logger.warn(it) { "Extension repository fetch failed" }
++            return emptySet()
++        }
++
++        val installedWithUpdate = transaction {
++            ExtensionTable
++                .selectAll()
++                .where {
++                    (ExtensionTable.isInstalled eq true) and
++                        (ExtensionTable.hasUpdate eq true) and
++                        (ExtensionTable.isObsolete eq false)
++                }
++                .map { it[ExtensionTable.pkgName] }
++        }
++
++        if (installedWithUpdate.isEmpty()) {
++            logger.debug { "No installed extensions have updates" }
++            return emptySet()
++        }
++
++        val updatedPkgs = mutableSetOf<String>()
++        for (pkgName in installedWithUpdate) {
++            runCatching {
++                logger.info { "Updating installed extension: $pkgName" }
++                extensionUpdater(pkgName)
++                updatedPkgs.add(pkgName)
++            }.onFailure {
++                logger.error(it) { "Failed to update extension: $pkgName" }
++            }
++        }
++        return updatedPkgs
++    }
++
++    fun recoverForUpdatedExtensions(updatedPkgs: Set<String>): Int {
++        if (updatedPkgs.isEmpty()) return 0
++        val affectedSourceIds = transaction {
++            (SourceTable innerJoin ExtensionTable)
++                .selectAll()
++                .where { ExtensionTable.pkgName inList updatedPkgs }
++                .map { it[SourceTable.id].value }
++                .toSet()
++        }
++        if (affectedSourceIds.isEmpty()) return 0
++
++        val eligibleChapterIds = getEligibleFailedChapterIds()
++        val currentQueue = queueProvider()
++        val affectedChapterIds = currentQueue
++            .filter { it.chapterId in eligibleChapterIds && it.sourceId in affectedSourceIds }
++            .map { it.chapterId }
++            .toSet()
++
++        if (affectedChapterIds.isNotEmpty()) {
++            logger.info { "Recovering ${affectedChapterIds.size} failed chapters for updated extensions: $updatedPkgs" }
++            return requeueFailedChapters(affectedChapterIds)
++        }
++        return 0
++    }
++}
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/ServerRecoveryPlan.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/ServerRecoveryPlan.kt
+new file mode 100644
+index 0000000..3e080b9
+--- /dev/null
++++ b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/ServerRecoveryPlan.kt
+@@ -0,0 +1,75 @@
++package suwayomi.tachidesk.manga.impl.update
++
++import kotlinx.serialization.Serializable
++
++@Serializable
++data class RecoveryRetryState(
++    val completedAt: Long,
++    val targetIds: Set<Int>,
++    val attempts: Int = 0,
++) {
++    init {
++        require(completedAt >= 0 && attempts in 0..4 && targetIds.all { it > 0 })
++    }
++}
++
++class RecoveryRetrySchedule(
++    initial: RecoveryRetryState? = null,
++    private val save: (RecoveryRetryState?) -> Unit = {},
++) {
++    companion object {
++        val DEADLINES_MS = listOf(
++            1 * 3_600_000L,
++            2 * 3_600_000L,
++            6 * 3_600_000L,
++            12 * 3_600_000L,
++        )
++    }
++
++    var snapshot: RecoveryRetryState? = initial
++        private set
++
++    val targetIds: Set<Int> get() = snapshot?.targetIds.orEmpty()
++
++    val nextDueAt: Long?
++        get() = snapshot?.takeIf { it.attempts < DEADLINES_MS.size }?.let {
++            it.completedAt + DEADLINES_MS[it.attempts]
++        }
++
++    private fun replace(state: RecoveryRetryState?) {
++        if (state == snapshot) return
++        save(state)
++        snapshot = state
++    }
++
++    fun clear() = replace(null)
++
++    fun startCycle(
++        completedAt: Long,
++        ids: Set<Int>,
++    ) = replace(ids.takeIf { it.isNotEmpty() }?.let { RecoveryRetryState(completedAt, it.toSet()) })
++
++    fun completed(id: Int) = retain(targetIds - id)
++
++    fun retain(ids: Set<Int>) {
++        val state = snapshot ?: return
++        val remaining = state.targetIds.intersect(ids)
++        replace(remaining.takeIf { it.isNotEmpty() }?.let { state.copy(targetIds = it) })
++    }
++
++    fun claimDue(
++        now: Long,
++        busy: Boolean = false,
++    ): Set<Int> {
++        val state = snapshot ?: return emptySet()
++        if (busy || now < state.completedAt) return emptySet()
++        val elapsed = now - state.completedAt
++        var dueAttempt = 0
++        while (dueAttempt < DEADLINES_MS.size && elapsed >= DEADLINES_MS[dueAttempt]) {
++            dueAttempt++
++        }
++        if (dueAttempt <= state.attempts) return emptySet()
++        replace(state.copy(attempts = dueAttempt))
++        return state.targetIds
++    }
++}
 diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/Updater.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/Updater.kt
-index fe4d61a..0726112 100644
+index fe4d61a..af9d48c 100644
 --- a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/Updater.kt
 +++ b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/Updater.kt
 @@ -14,6 +14,7 @@ import kotlinx.coroutines.SupervisorJob
@@ -147,7 +543,7 @@ index fe4d61a..0726112 100644
  import suwayomi.tachidesk.server.serverConfig
  import suwayomi.tachidesk.util.HAScheduler
  import uy.kohesive.injekt.Injekt
-@@ -90,6 +99,86 @@ class Updater : IUpdater {
+@@ -90,6 +99,118 @@ class Updater : IUpdater {
      private val lastAutomatedUpdateKey = "lastAutomatedGlobalUpdate"
      private val preferences = Injekt.get<Application>().getSharedPreferences("server_util", Context.MODE_PRIVATE)
  
@@ -188,19 +584,49 @@ index fe4d61a..0726112 100644
 +            while (true) {
 +                delay(30.seconds)
 +                runCatching {
-+                    synchronized(lifecycleLock) {
-+                        val now = System.currentTimeMillis()
++                    val now = System.currentTimeMillis()
++                    val libraryBusy = synchronized(lifecycleLock) { awaitingMainCompletion || isRunning() }
++                    val downloadBusy = ServerRecoveryManager.isDownloadManagerBusy()
++
++                    // 1. Extension maintenance check (every 6 hours)
++                    if (!libraryBusy && !downloadBusy && ServerRecoveryManager.extensionSchedule.isDue(now)) {
++                        val updatedPkgs = ServerRecoveryManager.performExtensionMaintenance(now)
++                        if (updatedPkgs.isNotEmpty()) {
++                            ServerRecoveryManager.recoverForUpdatedExtensions(updatedPkgs)
++                        }
++                    }
++
++                    // 2. Library update retries (+1h, +2h, +6h, +12h)
++                    val mangasToRetry = synchronized(lifecycleLock) {
 +                        if (!awaitingMainCompletion && !isRunning() && retries.nextDueAt?.let { now >= it } == true) {
 +                            val mangas = retryMangas()
 +                            retries.retain(mangas.map { it.id }.toSet())
 +                            val due = retries.claimDue(now)
 +                            if (due.isNotEmpty()) {
-+                                logger.info { "Retrying ${due.size} library failures (attempt ${retries.snapshot?.attempts}/2)" }
-+                                addMangasToQueue(mangas.filter { it.id in due })
++                                logger.info { "Retrying ${due.size} library failures (attempt ${retries.snapshot?.attempts}/${LibraryUpdateRetries.DEADLINES_MS.size})" }
++                                mangas.filter { it.id in due }
++                            } else emptyList()
++                        } else emptyList()
++                    }
++                    if (mangasToRetry.isNotEmpty()) {
++                        addMangasToQueue(mangasToRetry)
++                    }
++
++                    // 3. Failed download retries (+1h, +2h, +6h, +12h)
++                    synchronized(ServerRecoveryManager.recoveryLock) {
++                        if (!ServerRecoveryManager.isDownloadManagerBusy() &&
++                            ServerRecoveryManager.downloadRetries.nextDueAt?.let { now >= it } == true
++                        ) {
++                            val eligible = ServerRecoveryManager.getEligibleFailedChapterIds()
++                            ServerRecoveryManager.downloadRetries.retain(eligible)
++                            val dueChapters = ServerRecoveryManager.downloadRetries.claimDue(now)
++                            if (dueChapters.isNotEmpty()) {
++                                logger.info { "Retrying ${dueChapters.size} download failures (attempt ${ServerRecoveryManager.downloadRetries.snapshot?.attempts}/${RecoveryRetrySchedule.DEADLINES_MS.size})" }
++                                ServerRecoveryManager.requeueFailedChapters(dueChapters)
 +                            }
 +                        }
 +                    }
-+                }.onFailure { logger.error(it) { "Library retry dispatch failed" } }
++                }.onFailure { logger.error(it) { "Recovery dispatch loop failed" } }
 +            }
 +        }
 +    }
@@ -220,13 +646,15 @@ index fe4d61a..0726112 100644
 +        if (isRunning()) return false
 +        if (awaitingMainCompletion) {
 +            awaitingMainCompletion = false
++            val now = System.currentTimeMillis()
 +            retries.finishMainUpdate(
-+                System.currentTimeMillis(),
++                now,
 +                tracker.values
 +                    .filter { it.status == JobStatus.FAILED }
 +                    .map { it.manga.id }
 +                    .toSet(),
 +            )
++            ServerRecoveryManager.onMainUpdateFinished(now)
 +        }
 +        return true
 +    }
@@ -234,7 +662,7 @@ index fe4d61a..0726112 100644
      private var currentUpdateTaskId = ""
  
      init {
-@@ -274,58 +363,79 @@ class Updater : IUpdater {
+@@ -274,58 +395,79 @@ class Updater : IUpdater {
  
      private fun createUpdateChannel(source: String): Channel<UpdateJob> {
          val channel = Channel<UpdateJob>(Channel.UNLIMITED)
@@ -347,19 +775,20 @@ index fe4d61a..0726112 100644
  
          if (wasLastJob) {
              updateStatus(isRunning = false)
-@@ -412,6 +522,11 @@ class Updater : IUpdater {
+@@ -412,6 +554,12 @@ class Updater : IUpdater {
                  return@launch
              }
  
 +            synchronized(lifecycleLock) {
 +                retries.clear()
++                ServerRecoveryManager.onLibraryReset()
 +                awaitingMainCompletion = true
 +            }
 +
              scope.launch {
                  updateStatus(
                      categoryUpdates =
-@@ -432,10 +547,12 @@ class Updater : IUpdater {
+@@ -432,10 +580,12 @@ class Updater : IUpdater {
      }
  
      override fun addMangasToQueue(mangas: List<MangaDataClass>) {
@@ -376,7 +805,7 @@ index fe4d61a..0726112 100644
      }
  
      private fun addMangaToQueue(manga: MangaDataClass) {
-@@ -446,19 +563,24 @@ class Updater : IUpdater {
+@@ -446,19 +596,25 @@ class Updater : IUpdater {
      }
  
      override fun reset() {
@@ -385,188 +814,34 @@ index fe4d61a..0726112 100644
 +            updateGeneration++
 +            awaitingMainCompletion = false
 +            retries.clear()
++            ServerRecoveryManager.onLibraryReset()
 +            scope.coroutineContext.cancelChildren()
- 
--        tracker.clear()
--        this.mangaUpdates.clear()
--        this.categoryUpdates.clear()
--        this.updateStatusCategories = emptyMap()
--        this.updateStatusSkippedMangas = emptyList()
++
 +            tracker.clear()
 +            this.mangaUpdates.clear()
 +            this.categoryUpdates.clear()
 +            this.updateStatusCategories = emptyMap()
 +            this.updateStatusSkippedMangas = emptyList()
  
--        scope.launch {
--            updateStatus(immediate = true, isRunning = false)
--        }
+-        tracker.clear()
+-        this.mangaUpdates.clear()
+-        this.categoryUpdates.clear()
+-        this.updateStatusCategories = emptyMap()
+-        this.updateStatusSkippedMangas = emptyList()
 +            scope.launch {
 +                updateStatus(immediate = true, isRunning = false)
 +            }
  
--        updateChannels.forEach { (_, channel) -> channel.cancel() }
--        updateChannels.clear()
+-        scope.launch {
+-            updateStatus(immediate = true, isRunning = false)
 +            updateChannels.forEach { (_, channel) -> channel.cancel() }
 +            updateChannels.clear()
-+        }
+         }
+-
+-        updateChannels.forEach { (_, channel) -> channel.cancel() }
+-        updateChannels.clear()
      }
  }
-diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetries.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetries.kt
-new file mode 100644
-index 0000000..c443815
---- /dev/null
-+++ b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetries.kt
-@@ -0,0 +1,61 @@
-+package suwayomi.tachidesk.manga.impl.update
-+
-+import kotlinx.serialization.Serializable
-+
-+@Serializable
-+data class LibraryUpdateRetryState(
-+    val completedAt: Long,
-+    val mangaIds: Set<Int>,
-+    val attempts: Int = 0,
-+) {
-+    init {
-+        require(completedAt >= 0 && attempts in 0..2 && mangaIds.all { it > 0 })
-+    }
-+}
-+
-+/** Called under the updater lifecycle lock; persistence completes before dispatch. */
-+class LibraryUpdateRetries(
-+    initial: LibraryUpdateRetryState? = null,
-+    private val save: (LibraryUpdateRetryState?) -> Unit = {},
-+) {
-+    var snapshot: LibraryUpdateRetryState? = initial
-+        private set
-+
-+    val failedIds: Set<Int> get() = snapshot?.mangaIds.orEmpty()
-+
-+    val nextDueAt: Long? get() = snapshot?.takeIf { it.attempts < 2 }?.let { it.completedAt + (it.attempts + 1) * 3_600_000L }
-+
-+    private fun replace(state: LibraryUpdateRetryState?) {
-+        if (state == snapshot) return
-+        save(state)
-+        snapshot = state
-+    }
-+
-+    fun clear() = replace(null)
-+
-+    fun finishMainUpdate(
-+        completedAt: Long,
-+        failedIds: Set<Int>,
-+    ) = replace(failedIds.takeIf { it.isNotEmpty() }?.let { LibraryUpdateRetryState(completedAt, it.toSet()) })
-+
-+    fun chapterSynced(mangaId: Int) = retain(failedIds - mangaId)
-+
-+    fun retain(ids: Set<Int>) {
-+        val state = snapshot ?: return
-+        val remaining = state.mangaIds.intersect(ids)
-+        replace(remaining.takeIf { it.isNotEmpty() }?.let { state.copy(mangaIds = it) })
-+    }
-+
-+    fun claimDue(
-+        now: Long,
-+        busy: Boolean = false,
-+    ): Set<Int> {
-+        val state = snapshot ?: return emptySet()
-+        if (busy || now < state.completedAt) return emptySet()
-+        val dueAttempt = ((now - state.completedAt) / 3_600_000L).coerceAtMost(2).toInt()
-+        if (dueAttempt <= state.attempts) return emptySet()
-+        // Coalesce missed slots after sleep/restart; never burst two source requests.
-+        replace(state.copy(attempts = dueAttempt))
-+        return state.mangaIds
-+    }
-+}
-diff --git a/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetriesTest.kt b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetriesTest.kt
-new file mode 100644
-index 0000000..5059fa9
---- /dev/null
-+++ b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetriesTest.kt
-@@ -0,0 +1,82 @@
-+package suwayomi.tachidesk.manga.impl.update
-+
-+import kotlinx.serialization.json.Json
-+import org.junit.jupiter.api.Test
-+import kotlin.test.assertEquals
-+import kotlin.test.assertNull
-+
-+class LibraryUpdateRetriesTest {
-+    private val hour = 3_600_000L
-+    private val completedAt = 1_000_000L
-+
-+    @Test
-+    fun `both retries are anchored to main completion and stop after two`() {
-+        val retries = LibraryUpdateRetries()
-+        retries.finishMainUpdate(completedAt, setOf(1, 2))
-+        assertEquals(completedAt + hour, retries.nextDueAt)
-+        assertEquals(emptySet(), retries.claimDue(completedAt + hour - 1))
-+        assertEquals(setOf(1, 2), retries.claimDue(completedAt + hour))
-+        assertEquals(emptySet(), retries.claimDue(completedAt + hour + 1))
-+        retries.chapterSynced(1)
-+        assertEquals(setOf(2), retries.claimDue(completedAt + 2 * hour))
-+        assertEquals(emptySet(), retries.claimDue(completedAt + 20 * hour))
-+        assertEquals(setOf(2), retries.failedIds)
-+        assertNull(retries.nextDueAt)
-+    }
-+
-+    @Test
-+    fun `serialized plan resumes without repeating an attempted slot`() {
-+        var saved: LibraryUpdateRetryState? = null
-+        val retries = LibraryUpdateRetries(save = { saved = it })
-+        retries.finishMainUpdate(completedAt, setOf(3))
-+        retries.claimDue(completedAt + hour)
-+        val restored = LibraryUpdateRetries(Json.decodeFromString<LibraryUpdateRetryState>(Json.encodeToString(saved!!)))
-+        assertEquals(emptySet(), restored.claimDue(completedAt + hour + 100))
-+        assertEquals(setOf(3), restored.claimDue(completedAt + 2 * hour))
-+    }
-+
-+    @Test
-+    fun `missed slots coalesce and busy server does not consume an attempt`() {
-+        val retries = LibraryUpdateRetries()
-+        retries.finishMainUpdate(completedAt, setOf(4))
-+        assertEquals(emptySet(), retries.claimDue(completedAt + hour, busy = true))
-+        assertEquals(setOf(4), retries.claimDue(completedAt + 3 * hour))
-+        assertEquals(emptySet(), retries.claimDue(completedAt + 3 * hour + 1))
-+    }
-+
-+    @Test
-+    fun `manual success cancels retries only for the synchronized title`() {
-+        val retries = LibraryUpdateRetries()
-+        retries.finishMainUpdate(completedAt, setOf(1, 2))
-+        retries.chapterSynced(100)
-+        retries.chapterSynced(1)
-+        assertEquals(setOf(2), retries.claimDue(completedAt + hour))
-+        retries.chapterSynced(2)
-+        assertNull(retries.snapshot)
-+        assertEquals(emptySet(), retries.claimDue(completedAt + 2 * hour))
-+    }
-+
-+    @Test
-+    fun `reset and new main completion supersede old plans`() {
-+        val retries = LibraryUpdateRetries()
-+        retries.finishMainUpdate(completedAt, setOf(1))
-+        retries.clear()
-+        assertEquals(emptySet(), retries.claimDue(completedAt + hour))
-+        retries.finishMainUpdate(completedAt + hour, setOf(2))
-+        assertEquals(emptySet(), retries.claimDue(completedAt + hour))
-+        assertEquals(setOf(2), retries.claimDue(completedAt + 2 * hour))
-+        retries.finishMainUpdate(completedAt + 2 * hour, emptySet())
-+        assertNull(retries.snapshot)
-+    }
-+
-+    @Test
-+    fun `removed titles are excluded and state persists before dispatch`() {
-+        var saved: LibraryUpdateRetryState? = null
-+        val retries = LibraryUpdateRetries(save = { saved = it })
-+        retries.finishMainUpdate(completedAt, setOf(1, 2))
-+        retries.retain(setOf(2))
-+        assertEquals(setOf(2), retries.claimDue(completedAt + hour))
-+        assertEquals(1, saved?.attempts)
-+        assertEquals(setOf(2), saved?.mangaIds)
-+    }
-+}
 diff --git a/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateReconciliationTest.kt b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateReconciliationTest.kt
 new file mode 100644
 index 0000000..c9a1f6a
@@ -734,5 +1009,427 @@ index 0000000..c9a1f6a
 +        unmockkObject(GetSource)
 +        categoryId?.let { Category.removeCategory(it) }
 +        clearTables(ChapterTable, MangaTable)
++    }
++}
+diff --git a/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetriesTest.kt b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetriesTest.kt
+new file mode 100644
+index 0000000..139e7ef
+--- /dev/null
++++ b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/LibraryUpdateRetriesTest.kt
+@@ -0,0 +1,103 @@
++package suwayomi.tachidesk.manga.impl.update
++
++import kotlinx.serialization.json.Json
++import org.junit.jupiter.api.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertNull
++
++class LibraryUpdateRetriesTest {
++    private val hour = 3_600_000L
++    private val completedAt = 1_000_000L
++
++    @Test
++    fun `four deadlines are anchored to main completion and stop after four`() {
++        val retries = LibraryUpdateRetries()
++        retries.finishMainUpdate(completedAt, setOf(1, 2))
++        assertEquals(completedAt + hour, retries.nextDueAt)
++        assertEquals(emptySet(), retries.claimDue(completedAt + hour - 1))
++        
++        // Attempt 1: +1h
++        assertEquals(setOf(1, 2), retries.claimDue(completedAt + hour))
++        assertEquals(completedAt + 2 * hour, retries.nextDueAt)
++        assertEquals(emptySet(), retries.claimDue(completedAt + hour + 1))
++
++        // Attempt 2: +2h
++        retries.chapterSynced(1)
++        assertEquals(setOf(2), retries.claimDue(completedAt + 2 * hour))
++        assertEquals(completedAt + 6 * hour, retries.nextDueAt)
++
++        // Attempt 3: +6h
++        assertEquals(setOf(2), retries.claimDue(completedAt + 6 * hour))
++        assertEquals(completedAt + 12 * hour, retries.nextDueAt)
++
++        // Attempt 4: +12h
++        assertEquals(setOf(2), retries.claimDue(completedAt + 12 * hour))
++        assertNull(retries.nextDueAt)
++        assertEquals(emptySet(), retries.claimDue(completedAt + 24 * hour))
++        assertEquals(setOf(2), retries.failedIds)
++    }
++
++    @Test
++    fun `serialized plan resumes without repeating an attempted slot`() {
++        var saved: LibraryUpdateRetryState? = null
++        val retries = LibraryUpdateRetries(save = { saved = it })
++        retries.finishMainUpdate(completedAt, setOf(3))
++        retries.claimDue(completedAt + hour)
++        val restored = LibraryUpdateRetries(Json.decodeFromString<LibraryUpdateRetryState>(Json.encodeToString(saved!!)))
++        assertEquals(emptySet(), restored.claimDue(completedAt + hour + 100))
++        assertEquals(setOf(3), restored.claimDue(completedAt + 2 * hour))
++        assertEquals(2, restored.snapshot?.attempts)
++    }
++
++    @Test
++    fun `missed slots coalesce and busy server does not consume an attempt`() {
++        val retries = LibraryUpdateRetries()
++        retries.finishMainUpdate(completedAt, setOf(4))
++        assertEquals(emptySet(), retries.claimDue(completedAt + hour, busy = true))
++        // Jump past +6h (deadline 3)
++        assertEquals(setOf(4), retries.claimDue(completedAt + 7 * hour))
++        assertEquals(3, retries.snapshot?.attempts)
++        assertEquals(emptySet(), retries.claimDue(completedAt + 7 * hour + 1))
++        // Next due should be +12h
++        assertEquals(completedAt + 12 * hour, retries.nextDueAt)
++        assertEquals(setOf(4), retries.claimDue(completedAt + 13 * hour))
++        assertEquals(4, retries.snapshot?.attempts)
++        assertNull(retries.nextDueAt)
++    }
++
++    @Test
++    fun `manual success cancels retries only for the synchronized title`() {
++        val retries = LibraryUpdateRetries()
++        retries.finishMainUpdate(completedAt, setOf(1, 2))
++        retries.chapterSynced(100)
++        retries.chapterSynced(1)
++        assertEquals(setOf(2), retries.claimDue(completedAt + hour))
++        retries.chapterSynced(2)
++        assertNull(retries.snapshot)
++        assertEquals(emptySet(), retries.claimDue(completedAt + 2 * hour))
++    }
++
++    @Test
++    fun `reset and new main completion supersede old plans`() {
++        val retries = LibraryUpdateRetries()
++        retries.finishMainUpdate(completedAt, setOf(1))
++        retries.clear()
++        assertEquals(emptySet(), retries.claimDue(completedAt + hour))
++        retries.finishMainUpdate(completedAt + hour, setOf(2))
++        assertEquals(emptySet(), retries.claimDue(completedAt + hour))
++        assertEquals(setOf(2), retries.claimDue(completedAt + 2 * hour))
++        retries.finishMainUpdate(completedAt + 2 * hour, emptySet())
++        assertNull(retries.snapshot)
++    }
++
++    @Test
++    fun `removed titles are excluded and state persists before dispatch`() {
++        var saved: LibraryUpdateRetryState? = null
++        val retries = LibraryUpdateRetries(save = { saved = it })
++        retries.finishMainUpdate(completedAt, setOf(1, 2))
++        retries.retain(setOf(2))
++        assertEquals(setOf(2), retries.claimDue(completedAt + hour))
++        assertEquals(1, saved?.attempts)
++        assertEquals(setOf(2), saved?.mangaIds)
++    }
++}
+diff --git a/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/ServerRecoveryManagerTest.kt b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/ServerRecoveryManagerTest.kt
+new file mode 100644
+index 0000000..9e748c5
+--- /dev/null
++++ b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/ServerRecoveryManagerTest.kt
+@@ -0,0 +1,197 @@
++package suwayomi.tachidesk.manga.impl.update
++
++import kotlinx.coroutines.runBlocking
++import org.jetbrains.exposed.v1.jdbc.insert
++import org.jetbrains.exposed.v1.jdbc.transactions.transaction
++import org.junit.jupiter.api.AfterEach
++import org.junit.jupiter.api.BeforeEach
++import org.junit.jupiter.api.Test
++import suwayomi.tachidesk.manga.impl.download.model.DownloadQueueItem
++import suwayomi.tachidesk.manga.impl.download.model.DownloadState
++import suwayomi.tachidesk.manga.impl.download.model.Status
++import suwayomi.tachidesk.manga.model.table.ChapterTable
++import suwayomi.tachidesk.manga.model.table.ExtensionTable
++import suwayomi.tachidesk.manga.model.table.MangaTable
++import suwayomi.tachidesk.manga.model.table.SourceTable
++import suwayomi.tachidesk.test.ApplicationTest
++import suwayomi.tachidesk.test.clearTables
++import suwayomi.tachidesk.test.createLibraryManga
++import kotlin.test.assertEquals
++
++class ServerRecoveryManagerTest : ApplicationTest() {
++
++    @BeforeEach
++    fun prepare() {
++        ServerRecoveryManager.downloaderStateProvider = { Status.Stopped }
++        ServerRecoveryManager.downloaderStarter = {}
++        ServerRecoveryManager.queueProvider = { emptyList() }
++        ServerRecoveryManager.extensionFetcher = {}
++        ServerRecoveryManager.extensionUpdater = { "ok" }
++    }
++
++    @AfterEach
++    fun cleanup() {
++        clearTables(ChapterTable, MangaTable, SourceTable, ExtensionTable)
++    }
++
++    @Test
++    fun `eligible failed chapter filters out read, downloaded, non-library or non-error`() {
++        val inLibManga = createLibraryManga("InLib")
++        val notInLibManga = transaction {
++            MangaTable.insert {
++                it[title] = "NotInLib"
++                it[url] = "not-in-lib"
++                it[sourceReference] = 1L
++                it[inLibrary] = false
++            } get MangaTable.id
++        }.value
++
++        val (chEligible, chRead, chDownloaded, chNotInLib) = transaction {
++            val c1 = ChapterTable.insert {
++                it[manga] = inLibManga
++                it[name] = "Eligible"
++                it[url] = "c1"
++                it[sourceOrder] = 1
++                it[isRead] = false
++                it[isDownloaded] = false
++            } get ChapterTable.id
++
++            val c2 = ChapterTable.insert {
++                it[manga] = inLibManga
++                it[name] = "Read"
++                it[url] = "c2"
++                it[sourceOrder] = 2
++                it[isRead] = true
++                it[isDownloaded] = false
++            } get ChapterTable.id
++
++            val c3 = ChapterTable.insert {
++                it[manga] = inLibManga
++                it[name] = "Downloaded"
++                it[url] = "c3"
++                it[sourceOrder] = 3
++                it[isRead] = false
++                it[isDownloaded] = true
++            } get ChapterTable.id
++
++            val c4 = ChapterTable.insert {
++                it[manga] = notInLibManga
++                it[name] = "NotInLib"
++                it[url] = "c4"
++                it[sourceOrder] = 4
++                it[isRead] = false
++                it[isDownloaded] = false
++            } get ChapterTable.id
++
++            listOf(c1.value, c2.value, c3.value, c4.value)
++        }
++
++        val queue = listOf(
++            DownloadQueueItem(chEligible, 1, inLibManga, 1L, 10, state = DownloadState.Error),
++            DownloadQueueItem(chRead, 2, inLibManga, 1L, 10, state = DownloadState.Error),
++            DownloadQueueItem(chDownloaded, 3, inLibManga, 1L, 10, state = DownloadState.Error),
++            DownloadQueueItem(chNotInLib, 4, notInLibManga, 1L, 10, state = DownloadState.Error),
++        )
++        ServerRecoveryManager.queueProvider = { queue }
++
++        val eligible = ServerRecoveryManager.getEligibleFailedChapterIds()
++        assertEquals(setOf(chEligible), eligible)
++    }
++
++    @Test
++    fun `requeue failed chapters modifies only ERROR items and never recreates removed entries`() {
++        val q1 = DownloadQueueItem(101, 1, 1, 1L, 10, state = DownloadState.Error)
++        val q2 = DownloadQueueItem(102, 2, 1, 1L, 10, state = DownloadState.Downloading)
++        ServerRecoveryManager.queueProvider = { listOf(q1, q2) }
++        var started = false
++        ServerRecoveryManager.downloaderStarter = { started = true }
++
++        // Ask to requeue 101 (Error), 102 (Downloading), 103 (Not in queue)
++        val requeued = ServerRecoveryManager.requeueFailedChapters(setOf(101, 102, 103))
++        assertEquals(1, requeued)
++        assertEquals(DownloadState.Queued, q1.state)
++        assertEquals(DownloadState.Downloading, q2.state)
++        assertEquals(true, started)
++    }
++
++    @Test
++    fun `extension maintenance only updates installed extensions with update and triggers affected recovery`() = runBlocking {
++        transaction {
++            val ext1 = ExtensionTable.insert {
++                it[pkgName] = "ext.with.update"
++                it[name] = "Ext 1"
++                it[versionName] = "1.0"
++                it[versionCode] = 1L
++                it[extensionLib] = "1.4"
++                it[lang] = "en"
++                it[contentWarning] = 0
++                it[isInstalled] = true
++                it[hasUpdate] = true
++            } get ExtensionTable.id
++
++            val ext2 = ExtensionTable.insert {
++                it[pkgName] = "ext.not.installed"
++                it[name] = "Ext 2"
++                it[versionName] = "1.0"
++                it[versionCode] = 1L
++                it[extensionLib] = "1.4"
++                it[lang] = "en"
++                it[contentWarning] = 0
++                it[isInstalled] = false
++                it[hasUpdate] = true
++            } get ExtensionTable.id
++
++            val ext3 = ExtensionTable.insert {
++                it[pkgName] = "ext.up.to.date"
++                it[name] = "Ext 3"
++                it[versionName] = "1.0"
++                it[versionCode] = 1L
++                it[extensionLib] = "1.4"
++                it[lang] = "en"
++                it[contentWarning] = 0
++                it[isInstalled] = true
++                it[hasUpdate] = false
++            } get ExtensionTable.id
++
++            SourceTable.insert {
++                it[id] = 100L
++                it[name] = "Source 1"
++                it[lang] = "en"
++                it[extension] = ext1
++            }
++        }
++
++        var fetched = false
++        ServerRecoveryManager.extensionFetcher = { fetched = true }
++        val updatedList = mutableListOf<String>()
++        ServerRecoveryManager.extensionUpdater = { pkg ->
++            updatedList.add(pkg)
++            "ok"
++        }
++
++        val updated = ServerRecoveryManager.performExtensionMaintenance(System.currentTimeMillis())
++        assertEquals(setOf("ext.with.update"), updated)
++        assertEquals(listOf("ext.with.update"), updatedList)
++        assertEquals(true, fetched)
++
++        // Test recovery of affected source
++        val manga = createLibraryManga("Manga 100")
++        val chapterId = transaction {
++            ChapterTable.insert {
++                it[this.manga] = manga
++                it[name] = "Ch 1"
++                it[url] = "ch1"
++                it[sourceOrder] = 1
++                it[isRead] = false
++                it[isDownloaded] = false
++            } get ChapterTable.id
++        }.value
++
++        val item = DownloadQueueItem(chapterId, 1, manga, 100L, 5, state = DownloadState.Error)
++        ServerRecoveryManager.queueProvider = { listOf(item) }
++
++        val recoveredCount = ServerRecoveryManager.recoverForUpdatedExtensions(updated)
++        assertEquals(1, recoveredCount)
++        assertEquals(DownloadState.Queued, item.state)
++    }
++}
+diff --git a/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/ServerRecoveryPlanTest.kt b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/ServerRecoveryPlanTest.kt
+new file mode 100644
+index 0000000..2a822b3
+--- /dev/null
++++ b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/ServerRecoveryPlanTest.kt
+@@ -0,0 +1,104 @@
++package suwayomi.tachidesk.manga.impl.update
++
++import kotlinx.serialization.json.Json
++import org.junit.jupiter.api.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertNull
++
++class ServerRecoveryPlanTest {
++    private val hour = 3_600_000L
++    private val completedAt = 1_000_000L
++
++    @Test
++    fun `four deadlines are anchored to completion and stop after four`() {
++        val schedule = RecoveryRetrySchedule()
++        schedule.startCycle(completedAt, setOf(1, 2))
++        assertEquals(completedAt + hour, schedule.nextDueAt)
++        assertEquals(emptySet(), schedule.claimDue(completedAt + hour - 1))
++        
++        // Attempt 1: +1h
++        assertEquals(setOf(1, 2), schedule.claimDue(completedAt + hour))
++        assertEquals(completedAt + 2 * hour, schedule.nextDueAt)
++        assertEquals(emptySet(), schedule.claimDue(completedAt + hour + 1))
++
++        // Attempt 2: +2h
++        schedule.completed(1)
++        assertEquals(setOf(2), schedule.claimDue(completedAt + 2 * hour))
++        assertEquals(completedAt + 6 * hour, schedule.nextDueAt)
++
++        // Attempt 3: +6h
++        assertEquals(setOf(2), schedule.claimDue(completedAt + 6 * hour))
++        assertEquals(completedAt + 12 * hour, schedule.nextDueAt)
++
++        // Attempt 4: +12h
++        assertEquals(setOf(2), schedule.claimDue(completedAt + 12 * hour))
++        assertNull(schedule.nextDueAt)
++        assertEquals(emptySet(), schedule.claimDue(completedAt + 24 * hour))
++        assertEquals(setOf(2), schedule.targetIds)
++    }
++
++    @Test
++    fun `missed slots coalesce after sleep without repeated bursts`() {
++        val schedule = RecoveryRetrySchedule()
++        schedule.startCycle(completedAt, setOf(10))
++        assertEquals(emptySet(), schedule.claimDue(completedAt + hour, busy = true))
++        // Jump past +6h (deadline 3)
++        assertEquals(setOf(10), schedule.claimDue(completedAt + 7 * hour))
++        assertEquals(3, schedule.snapshot?.attempts)
++        assertEquals(emptySet(), schedule.claimDue(completedAt + 7 * hour + 1))
++        // Next due should be +12h
++        assertEquals(completedAt + 12 * hour, schedule.nextDueAt)
++        assertEquals(setOf(10), schedule.claimDue(completedAt + 13 * hour))
++        assertEquals(4, schedule.snapshot?.attempts)
++        assertNull(schedule.nextDueAt)
++    }
++
++    @Test
++    fun `serialized plan resumes accurately across restarts`() {
++        var saved: RecoveryRetryState? = null
++        val schedule = RecoveryRetrySchedule(save = { saved = it })
++        schedule.startCycle(completedAt, setOf(100, 200))
++        schedule.claimDue(completedAt + hour) // attempt 1 claimed
++        
++        val restored = RecoveryRetrySchedule(
++            Json.decodeFromString<RecoveryRetryState>(Json.encodeToString(saved!!))
++        )
++        assertEquals(1, restored.snapshot?.attempts)
++        assertEquals(completedAt + 2 * hour, restored.nextDueAt)
++        assertEquals(emptySet(), restored.claimDue(completedAt + hour + 100))
++        assertEquals(setOf(100, 200), restored.claimDue(completedAt + 2 * hour))
++        assertEquals(2, restored.snapshot?.attempts)
++    }
++}
++
++class ExtensionUpdateScheduleTest {
++    private val hour = 3_600_000L
++
++    @org.junit.jupiter.api.Test
++    fun `initial check is due immediately when timestamp is 0`() {
++        var saved = 0L
++        val schedule = ExtensionUpdateSchedule(
++            getInitialLastCheck = { saved },
++            saveLastCheck = { saved = it },
++        )
++        kotlin.test.assertTrue(schedule.isDue(1000L, busy = false))
++        kotlin.test.assertFalse(schedule.isDue(1000L, busy = true))
++        
++        schedule.markChecked(1000L)
++        kotlin.test.assertEquals(1000L, saved)
++        kotlin.test.assertFalse(schedule.isDue(1000L + 5 * hour))
++        kotlin.test.assertTrue(schedule.isDue(1000L + 6 * hour))
++    }
++
++    @org.junit.jupiter.api.Test
++    fun `persisted timestamp is respected across cycles`() {
++        var saved = 5000L
++        val schedule = ExtensionUpdateSchedule(
++            getInitialLastCheck = { saved },
++            saveLastCheck = { saved = it },
++        )
++        kotlin.test.assertEquals(5000L + 6 * hour, schedule.nextDueAt)
++        kotlin.test.assertFalse(schedule.isDue(5000L + 2 * hour))
++        kotlin.test.assertTrue(schedule.isDue(5000L + 6 * hour))
 +    }
 +}

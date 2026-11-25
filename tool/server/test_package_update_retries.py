@@ -23,9 +23,11 @@ class PackageTests(unittest.TestCase):
         with warnings.catch_warnings(), zipfile.ZipFile(self.base, "w") as jar:
             warnings.simplefilter("ignore", UserWarning)
             jar.writestr(module.OWNERS[0] + ".class", b"old")
-            jar.writestr(module.OWNERS[0] + "$Obsolete.class", b"old nested")
+            jar.writestr(module.OWNERS[3] + ".class", b"old updater")
+            jar.writestr(module.OWNERS[3] + "$Obsolete.class", b"old nested")
             jar.writestr("META-INF/MANIFEST.MF", "existing manifest")
             jar.writestr("META-INF/mobile-server-build.json", "existing fixes")
+            jar.writestr("META-INF/tsumiru-library-update-retries.json", "prior provenance")
             jar.writestr("duplicate", "first")
             jar.writestr("duplicate", "second")
         for owner in module.OWNERS:
@@ -41,13 +43,14 @@ class PackageTests(unittest.TestCase):
         self.package()
         with zipfile.ZipFile(self.base) as old, zipfile.ZipFile(self.output) as new:
             self.assertEqual(module.preserved(old), module.preserved(new))
-            self.assertNotIn(module.OWNERS[0] + "$Obsolete.class", new.namelist())
+            self.assertNotIn(module.OWNERS[3] + "$Obsolete.class", new.namelist())
             self.assertIn(module.METADATA, new.namelist())
+            self.assertIn("META-INF/tsumiru-library-update-retries.json", new.namelist())
 
     def test_refuses_unknown_base_missing_class_and_wrong_target(self):
         with self.assertRaisesRegex(ValueError, "Base JAR differs"):
             self.package(sha="0" * 64)
-        path = self.classes / (module.OWNERS[-1] + ".class")
+        path = self.classes / (module.OWNERS[3] + ".class")
         path.unlink()
         with self.assertRaisesRegex(ValueError, "Missing reviewed"):
             self.package()

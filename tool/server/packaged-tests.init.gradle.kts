@@ -13,6 +13,9 @@ gradle.projectsEvaluated {
                     "suwayomi.tachidesk.manga.impl.Manga",
                     "suwayomi.tachidesk.manga.impl.update.Updater",
                     "suwayomi.tachidesk.manga.impl.update.LibraryUpdateRetries",
+                    "suwayomi.tachidesk.manga.impl.update.ExtensionUpdateSchedule",
+                    "suwayomi.tachidesk.manga.impl.update.RecoveryRetrySchedule",
+                    "suwayomi.tachidesk.manga.impl.update.ServerRecoveryManager",
                 )) {
                     val type = loader.loadClass(name)
                     require(File(type.protectionDomain.codeSource.location.toURI()).canonicalFile == candidate)

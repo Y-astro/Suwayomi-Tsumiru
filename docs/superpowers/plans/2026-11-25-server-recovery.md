@@ -32,10 +32,10 @@
 
 **Interfaces:** Existing `LibraryUpdateRetries`, `LibraryUpdateRetryState` and `Updater` lifecycle hooks. Add narrowly scoped maintenance policy/state classes only as needed for deterministic clock/dependency tests.
 
-- [ ] Build a fresh isolated upstream source checkout and apply the existing maintained patch; never modify the earlier dirty server-source checkout.
-- [ ] Add failing tests for four deadlines, persistence/migration, missed slots, successful reconciliation, failed-download eligibility and the five review-focus cases.
-- [ ] Implement +1/+2/+6/+12 library retries, persistent failed-download recovery, and six-hour installed-extension update scheduling using existing APIs.
-- [ ] Run relevant unit and updater integration tests through existing isolated test harness; regenerate the complete maintained patch from the pinned clean source baseline.
+- [x] Build a fresh isolated upstream source checkout and apply the existing maintained patch; never modify the earlier dirty server-source checkout.
+- [x] Add failing tests for four deadlines, persistence/migration, missed slots, successful reconciliation, failed-download eligibility and the five review-focus cases.
+- [x] Implement +1/+2/+6/+12 library retries, persistent failed-download recovery, and six-hour installed-extension update scheduling using existing APIs.
+- [x] Run relevant unit and updater integration tests through existing isolated test harness; regenerate the complete maintained patch from the pinned clean source baseline.
 
 ### Task 2: Package and verify the existing custom server
 
@@ -43,10 +43,10 @@
 
 **Interfaces:** An exact fingerprinted installed JAR input, Java 21 compiled application classes, explicit owner list, and new versioned provenance without deleting existing provenance.
 
-- [ ] Add failing packaging tests for the current already-patched base, new owner coverage, wrong-base refusal, preservation of every unrelated entry/occurrence and existing metadata.
-- [ ] Implement the minimum versioned overlay packaging needed; do not broaden arbitrary class selection or disable integrity checks.
-- [ ] Compile selected production classes; run relevant tests against packaged candidate and verify class origins/linkage.
-- [ ] Commit reviewed source, patch, tests, plan progress and README. Report exact artifact hashes and unresolved limits. No live mutation, credentials, installs, remote push, PR or deployment from the worker.
+- [x] Add failing packaging tests for the current already-patched base, new owner coverage, wrong-base refusal, preservation of every unrelated entry/occurrence and existing metadata.
+- [x] Implement the minimum versioned overlay packaging needed; do not broaden arbitrary class selection or disable integrity checks.
+- [x] Compile selected production classes; run relevant tests against packaged candidate and verify class origins/linkage.
+- [x] Commit reviewed source, patch, tests, plan progress and README. Report exact artifact hashes and unresolved limits. No live mutation, credentials, installs, remote push, PR or deployment from the worker.
 
 ### Task 3: Root controlled deployment and acceptance
 
